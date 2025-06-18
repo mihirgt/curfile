@@ -1,0 +1,83 @@
+package com.example;
+
+import org.apache.spark.sql.Dataset;
+import org.apache.spark.sql.Row;
+import org.apache.spark.sql.SparkSession;
+import org.junit.After;
+import org.junit.Before;
+import org.junit.Test;
+import java.io.File;
+import java.lang.reflect.Method;
+
+import static org.assertj.core.api.Assertions.assertThat;
+
+/**
+ * Test class for CURIngestionApp
+ */
+public class CURIngestionAppTest {
+
+    private SparkSession spark;
+    private static final String SAMPLE_CUR_PATH = "src/test/resources/sample_cur_data.csv";
+
+    @Before
+    public void setUp() {
+        // Create a local Spark session for testing
+        spark = SparkSession.builder()
+                .appName("CURIngestionAppTest")
+                .master("local[2]")
+                .getOrCreate();
+    }
+
+    @After
+    public void tearDown() {
+        if (spark != null) {
+            spark.stop();
+        }
+    }
+
+    @Test
+    public void testReadCURFileCSV() throws Exception {
+        // Use reflection to access the private method
+        Method readCURFileMethod = CURIngestionApp.class.getDeclaredMethod(
+                "readCURFile", SparkSession.class, String.class);
+        readCURFileMethod.setAccessible(true);
+        
+        // Call the method with our test data
+        Dataset<Row> curData = (Dataset<Row>) readCURFileMethod.invoke(null, spark, SAMPLE_CUR_PATH);
+        
+        // Verify the data was loaded correctly
+        assertThat(curData).isNotNull();
+        assertThat(curData.count()).isGreaterThan(0);
+        
+        // Check that expected columns exist
+        String[] expectedColumns = {
+            "identity_line_item_id", 
+            "line_item_usage_account_id",
+            "line_item_product_code",
+            "line_item_unblended_cost"
+        };
+        
+        for (String column : expectedColumns) {
+            assertThat(curData.columns()).contains(column);
+        }
+    }
+    
+    @Test
+    public void testCreateDefaultConfigIfNeeded() throws Exception {
+        // Create a temporary file for testing
+        File tempFile = File.createTempFile("test-config", ".properties");
+        tempFile.deleteOnExit();
+        
+        // Use reflection to access the private method
+        Method createConfigMethod = CURIngestionApp.class.getDeclaredMethod(
+                "createDefaultConfigIfNeeded", String.class, String.class);
+        createConfigMethod.setAccessible(true);
+        
+        // Call the method
+        createConfigMethod.invoke(null, tempFile.getAbsolutePath(), "test-project-id");
+        
+        // Verify the file was created
+        assertThat(tempFile.exists()).isTrue();
+        assertThat(tempFile.length()).isGreaterThan(0);
+    }
+}
