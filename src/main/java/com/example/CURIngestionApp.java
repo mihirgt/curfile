@@ -3,8 +3,8 @@ package com.example;
 import org.apache.spark.SparkConf;
 import org.apache.spark.sql.Dataset;
 import org.apache.spark.sql.Row;
-import org.apache.spark.sql.SaveMode;
 import org.apache.spark.sql.SparkSession;
+import org.apache.spark.sql.SaveMode;
 import org.apache.spark.sql.functions;
 import org.apache.spark.sql.types.StructType;
 
@@ -24,8 +24,7 @@ public class CURIngestionApp {
 
     public static void main(String[] args) {
         if (args.length < 4) {
-            System.err.println("Usage: CURIngestionApp <gcs-bucket> <cur-file-path> <project-id> <dataset.table> [config-file] [rules-file] [tagging-mode]");
-            System.err.println("  tagging-mode: none, simple, scd, direct (default: simple)");
+            System.err.println("Usage: CURIngestionApp <gcs-bucket> <cur-file-path> <project-id> <dataset.table> [config-file] [rules-file] [use-scd-tags]");
             System.exit(1);
         }
 
@@ -35,15 +34,7 @@ public class CURIngestionApp {
         String bigQueryTable = args[3];
         String configFile = args.length > 4 ? args[4] : "gcp-config.properties";
         String rulesFile = args.length > 5 ? args[5] : "tagging-rules.properties";
-        String taggingMode = args.length > 6 ? args[6].toLowerCase() : "simple";
-        
-        // Validate tagging mode
-        if (!taggingMode.equals("none") && !taggingMode.equals("simple") && 
-            !taggingMode.equals("scd") && !taggingMode.equals("direct")) {
-            System.err.println("Invalid tagging mode: " + taggingMode);
-            System.err.println("Valid options are: none, simple, scd, direct");
-            System.exit(1);
-        }
+        boolean useSCDTags = args.length > 6 ? Boolean.parseBoolean(args[6]) : false;
 
         try {
             // Create config file if it doesn't exist
@@ -92,70 +83,25 @@ public class CURIngestionApp {
             Dataset<Row> transformedData = CURDataTransformer.transformForBigQuery(curData);
             transformedData = CURDataTransformer.applyDataQualityChecks(transformedData);
             
-            // Apply tagging rules based on the specified mode
-            System.out.println("Tagging mode: " + taggingMode);
+            // Determine tagging mode
+            String taggingMode = "regular";
+            if (useSCDTags) {
+                taggingMode = "scd";
+            } else if (args.length > 7 && args[7].equalsIgnoreCase("direct")) {
+                taggingMode = "direct";
+            }
             
-            try {
-                switch (taggingMode) {
-                    case "none":
-                        System.out.println("Skipping tagging as requested");
-                        break;
-                        
-                    case "simple":
-                        System.out.println("Applying simple tagging rules from: " + rulesFile);
-                        transformedData = CURDataTransformer.applyTags(transformedData, rulesFile);
-                        System.out.println("Tags applied successfully");
-                        System.out.println("Sample data with tags:");
-                        transformedData.select("identity_line_item_id", "line_item_product_code", "tags").show(5, false);
-                        break;
-                        
-                    case "scd":
-                        System.out.println("Applying SCD Type-2 tagging rules from: " + rulesFile);
-                        transformedData = CURDataTransformer.applySCDTags(transformedData, rulesFile);
-                        System.out.println("SCD Type-2 tags applied successfully");
-                        System.out.println("Sample data with SCD tags:");
-                        transformedData.select(
-                            "identity_line_item_id", 
-                            "line_item_product_code", 
-                            "tags", 
-                            "tag_effective_from", 
-                            "is_current_tag"
-                        ).show(5, false);
-                        break;
-                        
-                    case "direct":
-                        System.out.println("Applying direct tagging with history tracking from: " + rulesFile);
-                        
-                        // Process CUR data with direct tagging
-                        scala.Tuple2<Dataset<Row>, Dataset<Row>> result = 
-                            CURDataTransformer.applyDirectTags(transformedData, rulesFile, spark);
-                        
-                        // Get the tagged CUR data
-                        transformedData = result._1();
-                        
-                        // Get the resource tags history
-                        Dataset<Row> resourceTags = result._2();
-                        
-                        // Write resource tags history to BigQuery
-                        String[] tableComponents = bigQueryTable.split("\\.");
-                        String dataset = tableComponents[0];
-                        String resourceTagsTable = dataset + ".cur_resource_tags";
-                        
-                        System.out.println("Writing resource tags history to BigQuery table: " + resourceTagsTable);
-                        resourceTags.write()
-                            .format("bigquery")
-                            .option("table", projectId + ":" + resourceTagsTable)
-                            .mode(SaveMode.Append)
-                            .save();
-                        
-                        System.out.println("Sample data with direct tags:");
-                        transformedData.select("identity_line_item_id", "line_item_product_code", "tags").show(5, false);
-                        break;
-                }
-            } catch (Exception e) {
-                System.err.println("Warning: Failed to apply tags: " + e.getMessage());
-                System.err.println("Continuing without tags");
-                e.printStackTrace();
+            // Apply tagging based on the mode
+            System.out.println("Using tagging mode: " + taggingMode);
+            if (taggingMode.equalsIgnoreCase("scd")) {
+                // Apply SCD tagging
+                transformedData = CURDataTransformer.applySCDTags(transformedData, rulesFile);
+            } else if (taggingMode.equalsIgnoreCase("direct")) {
+                // Apply direct tagging
+                transformedData = CURDataTransformer.applyDirectTags(transformedData, rulesFile);
+            } else {
+                // Apply regular tagging (default)
+                transformedData = CURDataTransformer.applyTags(transformedData, rulesFile);
             }
             
             // Add processing timestamp
@@ -257,7 +203,7 @@ public class CURIngestionApp {
     }
     
     /**
-     * Write the processed data to BigQuery with deduplication using BigQuery's transactional MERGE
+     * Write the processed data to BigQuery
      * 
      * @param data Dataset<Row> to write to BigQuery
      * @param projectId Google Cloud project ID
@@ -265,110 +211,21 @@ public class CURIngestionApp {
      * @param tempBucket Temporary GCS bucket for BigQuery loading
      */
     private static void writeToBigQuery(Dataset<Row> data, String projectId, String tableId, String tempBucket) {
-        SparkSession spark = data.sparkSession();
-        String[] tableComponents = tableId.split("\\.");
+        System.out.println("Writing data to BigQuery table: " + projectId + ":" + tableId);
+        System.out.println("Using temporary bucket: " + tempBucket);
         
-        if (tableComponents.length != 2) {
-            throw new IllegalArgumentException("tableId must be in format 'dataset.table'");
-        }
+        // Configure BigQuery options
+        Map<String, String> options = new HashMap<>();
+        options.put("table", tableId);
+        options.put("temporaryGcsBucket", tempBucket);
+        options.put("partitionField", "ingestion_timestamp"); // Optional: enable partitioning
+        options.put("partitionType", "DAY"); // Optional: partition by day
         
-        String dataset = tableComponents[0];
-        String table = tableComponents[1];
-        String stagingTable = table + "_staging_" + System.currentTimeMillis();
-        String stagingTableId = dataset + "." + stagingTable;
-        String fullStagingTableId = projectId + ":" + stagingTableId;
-        String fullTableId = projectId + ":" + tableId;
-        
-        try {
-            System.out.println("Writing data to BigQuery staging table: " + fullStagingTableId);
-            System.out.println("Using temporary bucket: " + tempBucket);
-            
-            // Add ingestion timestamp to track when data was loaded
-            Dataset<Row> dataWithTimestamp = data.withColumn(
-                "ingestion_timestamp", 
-                functions.current_timestamp()
-            );
-            
-            // Configure BigQuery options for staging table
-            Map<String, String> stagingOptions = new HashMap<>();
-            stagingOptions.put("table", stagingTableId);
-            stagingOptions.put("temporaryGcsBucket", tempBucket);
-            stagingOptions.put("clustering", "identity_line_item_id"); // Cluster by primary key
-            
-            // Write to staging table with overwrite mode
-            dataWithTimestamp.write()
-                .format("bigquery")
-                .options(stagingOptions)
-                .mode(SaveMode.Overwrite) // Always overwrite staging table
-                .save(projectId);
-            
-            System.out.println("Performing transactional MERGE to deduplicate data in: " + fullTableId);
-            
-            // Check if target table exists, if not create it with the same schema as staging
-            boolean tableExists = false;
-            try {
-                spark.read().format("bigquery").option("table", fullTableId).load().limit(1).count();
-                tableExists = true;
-            } catch (Exception e) {
-                System.out.println("Target table doesn't exist yet. Will be created during merge.");
-            }
-            
-            // Construct and execute MERGE statement
-            if (tableExists) {
-                // Build column list for update clause (excluding identity_line_item_id)
-                StringBuilder updateColumns = new StringBuilder();
-                for (String colName : dataWithTimestamp.columns()) {
-                    if (!colName.equals("identity_line_item_id")) {
-                        if (updateColumns.length() > 0) {
-                            updateColumns.append(", ");
-                        }
-                        updateColumns.append("target.").append(colName).append(" = source.").append(colName);
-                    }
-                }
-                
-                // Build column list for insert clause
-                StringBuilder insertColumns = new StringBuilder();
-                StringBuilder insertValues = new StringBuilder();
-                for (String colName : dataWithTimestamp.columns()) {
-                    if (insertColumns.length() > 0) {
-                        insertColumns.append(", ");
-                        insertValues.append(", ");
-                    }
-                    insertColumns.append(colName);
-                    insertValues.append("source.").append(colName);
-                }
-                
-                // Execute MERGE statement
-                String mergeSql = "MERGE INTO `" + fullTableId + "` AS target " +
-                                "USING `" + fullStagingTableId + "` AS source " +
-                                "ON target.identity_line_item_id = source.identity_line_item_id " +
-                                "WHEN MATCHED THEN UPDATE SET " + updateColumns.toString() + " " +
-                                "WHEN NOT MATCHED THEN INSERT(" + insertColumns.toString() + ") " +
-                                "VALUES(" + insertValues.toString() + ")";
-                
-                spark.sql(mergeSql);
-                System.out.println("MERGE completed successfully");
-            } else {
-                // If target table doesn't exist, simply copy the staging table to target
-                String createSql = "CREATE OR REPLACE TABLE `" + fullTableId + "` " +
-                                  "CLUSTER BY identity_line_item_id " +
-                                  "PARTITION BY DATE(ingestion_timestamp) " +
-                                  "AS SELECT * FROM `" + fullStagingTableId + "`";
-                
-                spark.sql(createSql);
-                System.out.println("Created target table from staging data");
-            }
-            
-            // Drop staging table to clean up
-            spark.sql("DROP TABLE IF EXISTS `" + fullStagingTableId + "`");
-            System.out.println("Dropped staging table");
-            
-        } catch (Exception e) {
-            System.err.println("Error writing to BigQuery: " + e.getMessage());
-            e.printStackTrace();
-            // Keep staging table for debugging if there was an error
-            System.err.println("Staging table " + fullStagingTableId + " preserved for debugging");
-            throw new RuntimeException("Failed to write data to BigQuery", e);
-        }
+        // Write to BigQuery
+        data.write()
+            .format("bigquery")
+            .options(options)
+            .mode(SaveMode.Append) // Use Append, Overwrite, ErrorIfExists, or Ignore as needed
+            .save(projectId);
     }
 }

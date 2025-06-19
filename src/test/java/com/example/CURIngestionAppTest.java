@@ -8,6 +8,7 @@ import org.junit.Before;
 import org.junit.Test;
 import java.io.File;
 import java.lang.reflect.Method;
+import java.nio.file.Files;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -66,7 +67,7 @@ public class CURIngestionAppTest {
     public void testCreateDefaultConfigIfNeeded() throws Exception {
         // Create a temporary file for testing
         File tempFile = File.createTempFile("test-config", ".properties");
-        tempFile.deleteOnExit();
+        tempFile.delete(); // Delete so we can test creation
         
         // Use reflection to access the private method
         Method createConfigMethod = CURIngestionApp.class.getDeclaredMethod(
@@ -78,6 +79,13 @@ public class CURIngestionAppTest {
         
         // Verify the file was created
         assertThat(tempFile.exists()).isTrue();
-        assertThat(tempFile.length()).isGreaterThan(0);
+        
+        // Read the file content to verify it's not empty
+        String content = new String(Files.readAllBytes(tempFile.toPath()));
+        System.out.println("Config file content: " + content);
+        
+        // Verify the file has content (more specific than just checking length)
+        assertThat(content).contains("gcp.project.id=test-project-id");
+        assertThat(content).contains("bigquery.temp.bucket");
     }
 }

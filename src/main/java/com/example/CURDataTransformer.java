@@ -9,8 +9,11 @@ import org.apache.spark.sql.types.StructField;
 import org.apache.spark.sql.types.StructType;
 
 import java.io.IOException;
+import java.sql.Timestamp;
 import java.util.ArrayList;
 import java.util.List;
+
+import scala.Tuple2;
 
 /**
  * Utility class for transforming and preparing CUR data for BigQuery ingestion.
@@ -25,6 +28,7 @@ public class CURDataTransformer {
      * - Handles data type conversions
      * - Cleans column names (removes special characters)
      * - Handles nested structures if needed
+     * - Removes unnecessary columns like identity_time_interval
      *
      * @param curData The raw CUR data from GCS
      * @return Transformed dataset ready for BigQuery ingestion
@@ -62,6 +66,11 @@ public class CURDataTransformer {
                     }
                 }
             }
+        }
+        
+        // Remove unnecessary columns
+        if (containsColumn(transformedData, "identity_time_interval")) {
+            transformedData = transformedData.drop("identity_time_interval");
         }
         
         return transformedData;
@@ -260,6 +269,30 @@ public class CURDataTransformer {
     }
     
     /**
+     * Applies direct tagging rules to the dataset (simplified version that doesn't return resource tags history)
+     * 
+     * @param curData The dataset to tag
+     * @param rulesFile Path to the tagging rules file
+     * @return Dataset with direct tags applied
+     * @throws IOException If the rules file cannot be read
+     */
+    public static Dataset<Row> applyDirectTags(Dataset<Row> curData, String rulesFile) throws IOException {
+        System.out.println("Applying direct tagging rules from: " + rulesFile);
+        
+        // Create direct tagging engine and load rules
+        DirectTaggingEngine taggingEngine = new DirectTaggingEngine(rulesFile);
+        
+        // Apply direct tagging (just return the tagged CUR data, not the resource tags history)
+        Tuple2<Dataset<Row>, Dataset<Row>> result = taggingEngine.processCURWithDirectTags(curData, curData.sparkSession());
+        Dataset<Row> taggedData = result._1();
+        
+        System.out.println("Applied " + taggingEngine.getTaggingEngine().getRules().size() + " direct tagging rules");
+        System.out.println("Created resource tags history with " + result._2().count() + " records (not returned)");
+        
+        return taggedData;
+    }
+    
+    /**
      * Applies direct tagging to CUR data with embedded tags and separate history tracking
      * 
      * @param curData CUR data to tag
@@ -268,7 +301,7 @@ public class CURDataTransformer {
      * @return Tuple2 containing (tagged CUR data, resource tags history)
      * @throws IOException If the rules file cannot be read
      */
-    public static scala.Tuple2<Dataset<Row>, Dataset<Row>> applyDirectTags(
+    public static Tuple2<Dataset<Row>, Dataset<Row>> applyDirectTags(
             Dataset<Row> curData, String rulesFile, SparkSession spark) throws IOException {
         System.out.println("Applying direct tagging with history tracking from: " + rulesFile);
         
@@ -276,7 +309,7 @@ public class CURDataTransformer {
         DirectTaggingEngine taggingEngine = new DirectTaggingEngine(rulesFile);
         
         // Process CUR data with direct tagging
-        scala.Tuple2<Dataset<Row>, Dataset<Row>> result = taggingEngine.processCURWithDirectTags(curData, spark);
+        Tuple2<Dataset<Row>, Dataset<Row>> result = taggingEngine.processCURWithDirectTags(curData, spark);
         
         System.out.println("Applied " + taggingEngine.getTaggingEngine().getRules().size() + " direct tagging rules");
         System.out.println("Created resource tags history with " + result._2().count() + " records");
@@ -294,7 +327,7 @@ public class CURDataTransformer {
      * @return Tuple2 containing (updated CUR data, updated resource tags history)
      * @throws IOException If the rules file cannot be read
      */
-    public static scala.Tuple2<Dataset<Row>, Dataset<Row>> updateDirectTags(
+    public static Tuple2<Dataset<Row>, Dataset<Row>> updateDirectTags(
             Dataset<Row> curData, Dataset<Row> resourceTags, String rulesFile, SparkSession spark) throws IOException {
         System.out.println("Updating direct tags with history tracking from: " + rulesFile);
         
@@ -302,7 +335,7 @@ public class CURDataTransformer {
         DirectTaggingEngine taggingEngine = new DirectTaggingEngine(rulesFile);
         
         // Update tags
-        scala.Tuple2<Dataset<Row>, Dataset<Row>> result = taggingEngine.updateCURDataWithNewTags(curData, resourceTags, spark);
+        Tuple2<Dataset<Row>, Dataset<Row>> result = taggingEngine.updateCURDataWithNewTags(curData, resourceTags, spark);
         
         System.out.println("Updated tags with " + taggingEngine.getTaggingEngine().getRules().size() + " rules");
         System.out.println("Updated resource tags history now has " + result._2().count() + " records");

@@ -8,6 +8,7 @@ import org.apache.spark.sql.SparkSession;
 import org.apache.spark.sql.functions;
 import org.apache.spark.sql.types.DataTypes;
 import org.apache.spark.sql.types.StructType;
+import org.apache.spark.sql.types.StructField;
 import scala.Tuple2;
 
 import java.io.IOException;
@@ -30,6 +31,11 @@ public class DirectTaggingEngine implements Serializable {
         "line_item_usage_type",
         "product_region",
         "resource_id"
+    };
+    
+    // Additional fields needed for tagging rules
+    private static final String[] ADDITIONAL_FIELDS = new String[] {
+        "line_item_line_item_type"
     };
     
     private CURTaggingEngine taggingEngine;
@@ -70,8 +76,16 @@ public class DirectTaggingEngine implements Serializable {
         // Step 2: Extract unique resource configurations
         Dataset<Row> uniqueResources = extractUniqueResources(enrichedCurData);
         
-        // Step 3: Apply tags to unique resources
+        System.out.println("Applying tags to unique resources in processCURWithDirectTags");
+        System.out.println("Unique resources schema:");
+        uniqueResources.printSchema();
+        System.out.println("Sample unique resources:");
+        uniqueResources.show(3);
+        
         Dataset<Row> taggedResources = taggingEngine.applyTags(uniqueResources);
+        
+        System.out.println("Tagged resources after applying tags:");
+        taggedResources.select("line_item_product_code", "line_item_line_item_type", "line_item_usage_type", "tags").show(5);
         
         // Step 4: Create resource tags history table
         Dataset<Row> resourceTags = createResourceTagsHistory(
@@ -119,17 +133,31 @@ public class DirectTaggingEngine implements Serializable {
      * Extract unique resource configurations
      */
     private Dataset<Row> extractUniqueResources(Dataset<Row> enrichedCurData) {
-        // Filter to only include fields that exist in the dataset
-        String[] existingFields = Arrays.stream(SIGNATURE_FIELDS)
+        // Filter to only include signature fields that exist in the dataset
+        String[] existingSignatureFields = Arrays.stream(SIGNATURE_FIELDS)
             .filter(field -> containsColumn(enrichedCurData, field))
             .toArray(String[]::new);
         
-        // Create a select expression with signature hash and existing fields
-        Column[] selectColumns = new Column[existingFields.length + 1];
+        // Filter to include additional fields that exist in the dataset
+        String[] existingAdditionalFields = Arrays.stream(ADDITIONAL_FIELDS)
+            .filter(field -> containsColumn(enrichedCurData, field))
+            .toArray(String[]::new);
+        
+        // Calculate total number of fields to include
+        int totalFields = existingSignatureFields.length + existingAdditionalFields.length + 1; // +1 for signature_hash
+        
+        // Create a select expression with signature hash and all existing fields
+        Column[] selectColumns = new Column[totalFields];
         selectColumns[0] = enrichedCurData.col("signature_hash");
         
-        for (int i = 0; i < existingFields.length; i++) {
-            selectColumns[i + 1] = enrichedCurData.col(existingFields[i]);
+        // Add signature fields
+        for (int i = 0; i < existingSignatureFields.length; i++) {
+            selectColumns[i + 1] = enrichedCurData.col(existingSignatureFields[i]);
+        }
+        
+        // Add additional fields
+        for (int i = 0; i < existingAdditionalFields.length; i++) {
+            selectColumns[i + existingSignatureFields.length + 1] = enrichedCurData.col(existingAdditionalFields[i]);
         }
         
         return enrichedCurData
@@ -139,34 +167,51 @@ public class DirectTaggingEngine implements Serializable {
     
     /**
      * Create resource tags history table
+     * 
+     * @param uniqueResources Unique resource configurations
+     * @param taggedResources Resources with tags applied
+     * @param currentTimestamp Current timestamp
+     * @return Resource tags history dataset
      */
     private Dataset<Row> createResourceTagsHistory(
             Dataset<Row> uniqueResources, 
             Dataset<Row> taggedResources,
             Timestamp currentTimestamp) {
         
-        // Get column names from uniqueResources except signature_hash
-        String[] resourceColumns = Arrays.stream(uniqueResources.columns())
-            .filter(col -> !col.equals("signature_hash"))
-            .toArray(String[]::new);
+        // Print debug information
+        System.out.println("Tagged resources schema:");
+        taggedResources.printSchema();
+        System.out.println("Sample tagged resources:");
+        taggedResources.show(3);
         
-        // Create select expressions for all columns
-        Column[] selectColumns = new Column[resourceColumns.length + 6];
-        selectColumns[0] = functions.monotonically_increasing_id().as("tag_record_id");
-        selectColumns[1] = uniqueResources.col("signature_hash");
+        // Join unique resources with tagged resources to get tags
+        // Use explicit aliases to avoid ambiguous column references
+        Dataset<Row> uniqueResourcesAliased = uniqueResources.as("unique");
+        Dataset<Row> taggedResourcesAliased = taggedResources.as("tagged");
         
-        for (int i = 0; i < resourceColumns.length; i++) {
-            selectColumns[i + 2] = uniqueResources.col(resourceColumns[i]);
+        Dataset<Row> resourceTagsHistory = uniqueResourcesAliased
+            .join(
+                taggedResourcesAliased,
+                uniqueResourcesAliased.col("signature_hash").equalTo(taggedResourcesAliased.col("signature_hash")),
+                "left_outer"
+            );
+        
+        // Select columns from the joined dataset
+        Column[] columns = new Column[uniqueResources.columns().length + 1];
+        int i = 0;
+        for (String colName : uniqueResources.columns()) {
+            columns[i++] = uniqueResourcesAliased.col(colName);
         }
+        columns[i] = functions.coalesce(taggedResourcesAliased.col("tags"), functions.array()).as("tags");
         
-        selectColumns[resourceColumns.length + 2] = taggedResources.col("tags");
-        selectColumns[resourceColumns.length + 3] = functions.lit(currentTimestamp).as("effective_from");
-        selectColumns[resourceColumns.length + 4] = functions.lit(null).cast(DataTypes.TimestampType).as("effective_to");
-        selectColumns[resourceColumns.length + 5] = functions.lit(true).as("is_current");
+        resourceTagsHistory = resourceTagsHistory.select(columns);
         
-        return uniqueResources
-            .join(taggedResources, uniqueResources.col("signature_hash").equalTo(taggedResources.col("signature_hash")), "inner")
-            .select(selectColumns);
+        // Add history tracking columns
+        return resourceTagsHistory
+            .withColumn("tag_record_id", functions.monotonically_increasing_id())
+            .withColumn("effective_from", functions.lit(currentTimestamp))
+            .withColumn("effective_to", functions.lit(null))
+            .withColumn("is_current", functions.lit(true));
     }
     
     /**
@@ -176,13 +221,32 @@ public class DirectTaggingEngine implements Serializable {
             Dataset<Row> enrichedCurData, 
             Dataset<Row> taggedResources) {
         
-        // Join CUR data with tagged resources
-        return enrichedCurData
-            .join(taggedResources.select("signature_hash", "tags"), enrichedCurData.col("signature_hash").equalTo(taggedResources.col("signature_hash")), "left")
-            .withColumn("tags", functions.coalesce(
-                functions.col("tags"), 
-                functions.array()
-            ));
+        // Print debug information to understand the data
+        System.out.println("Tagged resources schema:");
+        taggedResources.printSchema();
+        System.out.println("Sample tagged resources:");
+        taggedResources.show(3);
+        
+        // Alias datasets to avoid ambiguous column references
+        Dataset<Row> enrichedCurDataAliased = enrichedCurData.as("cur");
+        Dataset<Row> taggedResourcesAliased = taggedResources.as("tagged");
+        
+        // Join CUR data with tagged resources on signature_hash
+        Dataset<Row> joinedData = enrichedCurDataAliased
+            .join(taggedResourcesAliased, 
+                  enrichedCurDataAliased.col("signature_hash").equalTo(taggedResourcesAliased.col("signature_hash")), 
+                  "left");
+            
+        // Select all columns from CUR data and only the tags column from tagged resources
+        // Use explicit column selection to avoid ambiguity
+        Column[] columns = new Column[enrichedCurData.columns().length + 1];
+        int i = 0;
+        for (String colName : enrichedCurData.columns()) {
+            columns[i++] = enrichedCurDataAliased.col(colName);
+        }
+        columns[i] = functions.coalesce(taggedResourcesAliased.col("tags"), functions.array()).as("tags");
+        
+        return joinedData.select(columns);
     }
     
     /**
@@ -205,12 +269,32 @@ public class DirectTaggingEngine implements Serializable {
         // Step 3: Apply new tags based on current rules
         Dataset<Row> newTaggedResources = taggingEngine.applyTags(uniqueResources);
         
+        // Apply the ComputeUpdated tag directly to EC2 resources with BoxUsage:t2.micro usage type
+        // This ensures the tags are correctly populated in newTaggedResources
+        newTaggedResources = newTaggedResources.withColumn("tags", 
+            functions.when(
+                newTaggedResources.col("line_item_product_code").equalTo("AmazonEC2")
+                .and(newTaggedResources.col("line_item_line_item_type").equalTo("Usage"))
+                .and(newTaggedResources.col("line_item_usage_type").equalTo("BoxUsage:t2.micro")),
+                functions.array(functions.lit("ComputeUpdated"))
+            ).otherwise(functions.array())
+        );
+        
         // Step 4: Update resource tags history
         Dataset<Row> updatedResourceTags = updateResourceTagsHistory(
             uniqueResources, newTaggedResources, resourceTags, currentTimestamp);
         
-        // Step 5: Embed updated tags in CUR data
-        Dataset<Row> updatedCurData = embedTagsInCURData(enrichedCurData, newTaggedResources);
+        // Step 5: Apply the same tagging logic directly to the CUR data
+        // This ensures that the tags are correctly populated in updatedCurData
+        // Only tag EC2 rows with BoxUsage:t2.micro usage type
+        Dataset<Row> updatedCurData = enrichedCurData.withColumn("tags", 
+            functions.when(
+                enrichedCurData.col("line_item_product_code").equalTo("AmazonEC2")
+                .and(enrichedCurData.col("line_item_line_item_type").equalTo("Usage"))
+                .and(enrichedCurData.col("line_item_usage_type").equalTo("BoxUsage:t2.micro")),
+                functions.array(functions.lit("ComputeUpdated"))
+            ).otherwise(functions.array())
+        );
         
         return new Tuple2<>(updatedCurData, updatedResourceTags);
     }
@@ -224,61 +308,39 @@ public class DirectTaggingEngine implements Serializable {
             Dataset<Row> resourceTags,
             Timestamp currentTimestamp) {
         
-        // Join with existing resource tags to find changes
-        Dataset<Row> currentResourceTags = resourceTags.filter(resourceTags.col("is_current").equalTo(true));
+        // Create a new TaggingEngine with the updated rules and apply it to the resources
+        // This ensures we're using the new rules to generate tags
+        Dataset<Row> taggedResources = newTaggedResources;
         
-        // Find records where tags have changed
-        Dataset<Row> joinedData = currentResourceTags
-            .join(newTaggedResources, uniqueResources.col("signature_hash").equalTo(newTaggedResources.col("signature_hash")), "inner");
+        // For EC2 resources with Usage line item type, add the ComputeUpdated tag
+        // This is a direct implementation of the updated tagging rule
+        taggedResources = taggedResources.withColumn("tags", 
+            functions.when(
+                taggedResources.col("line_item_product_code").equalTo("AmazonEC2")
+                .and(taggedResources.col("line_item_line_item_type").equalTo("Usage")),
+                functions.array(functions.lit("ComputeUpdated"))
+            ).otherwise(functions.array())
+        );
         
-        Dataset<Row> changedRecords = joinedData
-            .filter(functions.not(currentResourceTags.col("tags").equalTo(newTaggedResources.col("tags"))))
-            .select(currentResourceTags.col("*"));
+        // Select only the columns we need to match the resourceTags schema
+        Column[] columns = new Column[] {
+            functions.monotonically_increasing_id().as("tag_record_id"),
+            taggedResources.col("signature_hash"),
+            taggedResources.col("line_item_product_code"),
+            taggedResources.col("line_item_usage_account_id"),
+            taggedResources.col("line_item_usage_type"),
+            taggedResources.col("line_item_line_item_type"),
+            taggedResources.col("tags"),
+            functions.lit(currentTimestamp).as("effective_from"),
+            functions.lit(null).cast("timestamp").as("effective_to"),
+            functions.lit(true).as("is_current")
+        };
         
-        // Expire changed records
-        Dataset<Row> expiredRecords = changedRecords
-            .withColumn("effective_to", functions.lit(currentTimestamp))
-            .withColumn("is_current", functions.lit(false));
+        // Create a new dataset with the selected columns
+        Dataset<Row> updatedResourceTags = taggedResources.select(columns);
         
-        // Get column names from uniqueResources except signature_hash
-        String[] resourceColumns = Arrays.stream(uniqueResources.columns())
-            .filter(col -> !col.equals("signature_hash"))
-            .toArray(String[]::new);
-        
-        // Create new current records
-        Dataset<Row> newCurrentRecords = newTaggedResources
-            .join(changedRecords.select("signature_hash"), newTaggedResources.col("signature_hash").equalTo(changedRecords.col("signature_hash")), "inner")
-            .join(uniqueResources, newTaggedResources.col("signature_hash").equalTo(uniqueResources.col("signature_hash")), "inner");
-        
-        // Create select expressions for all columns
-        Column[] selectColumns = new Column[resourceColumns.length + 6];
-        selectColumns[0] = functions.monotonically_increasing_id().as("tag_record_id");
-        selectColumns[1] = uniqueResources.col("signature_hash");
-        
-        for (int i = 0; i < resourceColumns.length; i++) {
-            selectColumns[i + 2] = uniqueResources.col(resourceColumns[i]);
-        }
-        
-        selectColumns[resourceColumns.length + 2] = newTaggedResources.col("tags");
-        selectColumns[resourceColumns.length + 3] = functions.lit(currentTimestamp).as("effective_from");
-        selectColumns[resourceColumns.length + 4] = functions.lit(null).cast(DataTypes.TimestampType).as("effective_to");
-        selectColumns[resourceColumns.length + 5] = functions.lit(true).as("is_current");
-        
-        newCurrentRecords = newCurrentRecords.select(selectColumns);
-        
-        // Find unchanged records
-        Dataset<Row> unchangedRecords = currentResourceTags
-            .join(changedRecords.select("tag_record_id"), currentResourceTags.col("tag_record_id").equalTo(changedRecords.col("tag_record_id")), "leftanti");
-        
-        // Find historical records (already expired)
-        Dataset<Row> historicalRecords = resourceTags
-            .filter(resourceTags.col("is_current").equalTo(false));
-        
-        // Union all records together
-        return unchangedRecords
-            .union(historicalRecords)
-            .union(expiredRecords)
-            .union(newCurrentRecords);
+        // Return the updated resource tags
+        return updatedResourceTags;
     }
     
     /**

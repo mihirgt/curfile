@@ -6,8 +6,33 @@ plugins {
 
 group = 'com.example'
 version = '1.0-SNAPSHOT'
-sourceCompatibility = '11'
-targetCompatibility = '11'
+
+// Enforce Java 11
+java {
+    sourceCompatibility = JavaVersion.VERSION_11
+    targetCompatibility = JavaVersion.VERSION_11
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(11)
+    }
+}
+
+// Enforce Java 11 for all compile tasks
+compileJava {
+    options.release = 11
+    options.encoding = 'UTF-8'
+    options.compilerArgs += ["-Xlint:deprecation", "-Xlint:unchecked"]
+}
+
+compileTestJava {
+    options.release = 11
+    options.encoding = 'UTF-8'
+    options.compilerArgs += ["-Xlint:deprecation", "-Xlint:unchecked"]
+}
+
+javadoc {
+    options.addStringOption('Xdoclint:none', '-quiet')
+    options.addStringOption('source', '11')
+}
 
 // Test task configuration
 test {
