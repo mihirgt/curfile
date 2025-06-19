@@ -1,0 +1,77 @@
+# Test-specific tagging rules configuration
+# These rules are only used in test environments
+
+# Define specific rules for test data
+tagging_rules:
+  # Simple rule with AND conditions
+  - rule_name: EC2Resources
+    tag_name: Compute
+    conditions:
+      logical_operator: AND  # All conditions must be true
+      conditions:
+        - field: line_item_product_code
+          operator: ==
+          value: AmazonEC2
+        - field: line_item_line_item_type
+          operator: ==
+          value: Usage
+
+  # Simple rule with AND conditions
+  - rule_name: S3Resources
+    tag_name: Storage
+    conditions:
+      logical_operator: AND
+      conditions:
+        - field: line_item_product_code
+          operator: ==
+          value: AmazonS3
+        - field: line_item_line_item_type
+          operator: ==
+          value: Usage
+          
+  # Simple rule with AND conditions
+  - rule_name: RDSResources
+    tag_name: Database
+    conditions:
+      logical_operator: AND
+      conditions:
+        - field: line_item_product_code
+          operator: ==
+          value: AmazonRDS
+        - field: line_item_line_item_type
+          operator: ==
+          value: Usage
+          
+  # Complex rule with nested AND/OR conditions
+  - rule_name: NetworkingResources
+    tag_name: Networking
+    conditions:
+      logical_operator: OR  # Any of these condition groups can be true
+      conditions:
+        # First condition group - VPC resources
+        - logical_operator: AND
+          conditions:
+            - field: line_item_product_code
+              operator: ==
+              value: AmazonVPC
+            - field: line_item_line_item_type
+              operator: ==
+              value: Usage
+        # Second condition group - CloudFront resources
+        - logical_operator: AND
+          conditions:
+            - field: line_item_product_code
+              operator: ==
+              value: AmazonCloudFront
+            - field: line_item_line_item_type
+              operator: ==
+              value: Usage
+        # Third condition group - EC2 data transfer
+        - logical_operator: AND
+          conditions:
+            - field: line_item_product_code
+              operator: ==
+              value: AmazonEC2
+            - field: line_item_usage_type
+              operator: contains
+              value: DataTransfer

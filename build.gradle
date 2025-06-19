@@ -91,6 +91,9 @@ dependencies {
     // Kubernetes Client
     implementation "io.kubernetes:client-java:${kubernetesClientVersion}"
     
+    // YAML Configuration Parser
+    implementation 'org.yaml:snakeyaml:2.0'
+    
     // Testing Dependencies
     testImplementation 'junit:junit:4.13.2'
     testImplementation 'org.assertj:assertj-core:3.24.2'

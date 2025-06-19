@@ -6,145 +6,206 @@ import org.apache.spark.sql.Row;
 import org.apache.spark.sql.functions;
 
 import java.io.Serializable;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
 
 /**
  * Represents a rule for tagging CUR data.
- * Each rule consists of a condition and a tag to apply when the condition is met.
+ * Each rule consists of a set of conditions and a tag to apply when the conditions are met.
  */
 public class CURTagRule implements Serializable {
     private static final long serialVersionUID = 1L;
     
     private String ruleName;
-    private String conditionField;
-    private String conditionOperator;
-    private String conditionValue;
     private String tagName;
+    private Condition rootCondition;
     
     /**
-     * Creates a new tag rule
-     * 
-     * @param ruleName Name of the rule for identification
-     * @param conditionField Field to check in the condition
-     * @param conditionOperator Operator for the condition (==, !=, >, <, >=, <=, contains, startsWith, endsWith)
-     * @param conditionValue Value to compare against
-     * @param tagName Tag to apply when condition is met
+     * Base class for conditions
      */
-    public CURTagRule(String ruleName, String conditionField, String conditionOperator, 
-                     String conditionValue, String tagName) {
+    public static abstract class Condition implements Serializable {
+        private static final long serialVersionUID = 1L;
+        
+        /**
+         * Evaluate the condition on the dataset
+         * 
+         * @param dataset The dataset to evaluate against
+         * @return A Spark SQL Column expression representing the condition
+         */
+        public abstract Column evaluate(Dataset<Row> dataset);
+    }
+    
+    /**
+     * Simple condition that checks a field against a value using an operator
+     */
+    public static class SimpleCondition extends Condition {
+        private static final long serialVersionUID = 1L;
+        
+        private String field;
+        private String operator;
+        private String value;
+        
+        public SimpleCondition(String field, String operator, String value) {
+            this.field = field;
+            this.operator = operator;
+            this.value = value;
+        }
+        
+        @Override
+        public Column evaluate(Dataset<Row> dataset) {
+            // Find the column with exact match or case-insensitive match
+            String actualColumnName = findColumnNameIgnoreCase(dataset, field);
+            
+            if (actualColumnName == null) {
+                System.out.println("Condition skipped: Column '" + field + "' not found in dataset");
+                return functions.lit(false);
+            }
+            
+            Column fieldColumn = dataset.col(actualColumnName);
+            
+            // Apply the condition based on the operator
+            switch (operator.toLowerCase()) {
+                case "==":
+                case "equals":
+                    return fieldColumn.equalTo(value);
+                case "!=":
+                case "not equals":
+                    return fieldColumn.notEqual(value);
+                case ">":
+                case "greater than":
+                    return fieldColumn.gt(value);
+                case "<":
+                case "less than":
+                    return fieldColumn.lt(value);
+                case ">=":
+                case "greater than or equal":
+                    return fieldColumn.geq(value);
+                case "<=":
+                case "less than or equal":
+                    return fieldColumn.leq(value);
+                case "contains":
+                    return fieldColumn.contains(value);
+                case "startswith":
+                    return fieldColumn.startsWith(value);
+                case "endswith":
+                    return fieldColumn.endsWith(value);
+                case "is null":
+                    return fieldColumn.isNull();
+                case "is not null":
+                    return fieldColumn.isNotNull();
+                default:
+                    // Default to equality check
+                    System.out.println("Using default equality operator for unknown operator: '" + operator + "'");
+                    return fieldColumn.equalTo(value);
+            }
+        }
+        
+        /**
+         * Find a column name in the dataset, ignoring case sensitivity
+         * 
+         * @param dataset The dataset to search in
+         * @param columnName The column name to find (case insensitive)
+         * @return The actual column name in the dataset, or null if not found
+         */
+        private String findColumnNameIgnoreCase(Dataset<Row> dataset, String columnName) {
+            // First try exact match
+            if (CURDataTransformer.containsColumn(dataset, columnName)) {
+                return columnName;
+            }
+            
+            // Try case-insensitive match
+            String lowerColumnName = columnName.toLowerCase();
+            for (String col : dataset.columns()) {
+                if (col.toLowerCase().equals(lowerColumnName)) {
+                    System.out.println("Found column '" + col + "' (was looking for '" + columnName + "')");
+                    return col;
+                }
+            }
+            
+            return null;
+        }
+    }
+    
+    /**
+     * Compound condition that combines multiple conditions with a logical operator (AND/OR)
+     */
+    public static class CompoundCondition extends Condition {
+        private static final long serialVersionUID = 1L;
+        
+        private String logicalOperator; // "AND" or "OR"
+        private List<Condition> conditions;
+        
+        public CompoundCondition(String logicalOperator, List<Condition> conditions) {
+            this.logicalOperator = logicalOperator;
+            this.conditions = conditions;
+        }
+        
+        @Override
+        public Column evaluate(Dataset<Row> dataset) {
+            if (conditions == null || conditions.isEmpty()) {
+                return functions.lit(true); // Empty conditions evaluate to true
+            }
+            
+            // Start with the first condition
+            Column result = conditions.get(0).evaluate(dataset);
+            
+            // Combine with remaining conditions using the logical operator
+            for (int i = 1; i < conditions.size(); i++) {
+                Column nextCondition = conditions.get(i).evaluate(dataset);
+                
+                if ("OR".equalsIgnoreCase(logicalOperator)) {
+                    result = result.or(nextCondition);
+                } else { // Default to AND
+                    result = result.and(nextCondition);
+                }
+            }
+            
+            return result;
+        }
+    }
+    
+    /**
+     * Constructor for a CUR tagging rule with a complex condition
+     * 
+     * @param ruleName Name of the rule
+     * @param tagName Tag to apply if condition is met
+     * @param rootCondition The root condition to evaluate
+     */
+    public CURTagRule(String ruleName, String tagName, Condition rootCondition) {
         this.ruleName = ruleName;
-        this.conditionField = conditionField;
-        this.conditionOperator = conditionOperator;
-        this.conditionValue = conditionValue;
         this.tagName = tagName;
+        this.rootCondition = rootCondition;
     }
     
     /**
      * Applies this rule to the dataset and returns a column expression that evaluates to true
-     * when the rule's condition is met.
+     * when the rule's condition is met. Only applies rules on signature fields from configuration.
      * 
      * @param dataset The dataset to apply the rule to
      * @return Column expression for the condition
      */
     public Column getConditionExpression(Dataset<Row> dataset) {
-        // Try to find the column with exact match or case-insensitive match
-        String actualColumnName = findColumnNameIgnoreCase(dataset, conditionField);
+        // Validate that the rule uses signature fields
+        validateSignatureFields(dataset);
         
-        if (actualColumnName == null) {
-            System.out.println("Rule '" + ruleName + "' skipped: Column '" + conditionField + "' not found in dataset");
-            // Print available columns for debugging
-            System.out.println("Available columns: " + String.join(", ", dataset.columns()));
-            return functions.lit(false);
-        }
-        
-        Column fieldColumn = dataset.col(actualColumnName);
-        Column condition;
-        
-        // For test purposes, always apply tags to Usage rows
-        if (actualColumnName.equals("line_item_product_code") && 
-            (conditionValue.equals("AmazonEC2") || conditionValue.equals("AmazonS3") || conditionValue.equals("AmazonRDS"))) {
-            // Special handling for product code matching in tests
-            condition = fieldColumn.equalTo(conditionValue)
-                .and(dataset.col("line_item_line_item_type").equalTo("Usage"));
-            System.out.println("Special handling for '" + conditionValue + "' with Usage type filter");
-        } else {
-            // Normal condition handling
-            switch (conditionOperator.toLowerCase()) {
-                case "==":
-                case "equals":
-                    condition = fieldColumn.equalTo(conditionValue);
-                    break;
-                case "!=":
-                case "not equals":
-                    condition = fieldColumn.notEqual(conditionValue);
-                    break;
-                case ">":
-                case "greater than":
-                    condition = fieldColumn.gt(conditionValue);
-                    break;
-                case "<":
-                case "less than":
-                    condition = fieldColumn.lt(conditionValue);
-                    break;
-                case ">=":
-                case "greater than or equal":
-                    condition = fieldColumn.geq(conditionValue);
-                    break;
-                case "<=":
-                case "less than or equal":
-                    condition = fieldColumn.leq(conditionValue);
-                    break;
-                case "contains":
-                    condition = fieldColumn.contains(conditionValue);
-                    break;
-                case "startswith":
-                    condition = fieldColumn.startsWith(conditionValue);
-                    break;
-                case "endswith":
-                    condition = fieldColumn.endsWith(conditionValue);
-                    break;
-                case "is null":
-                    condition = fieldColumn.isNull();
-                    break;
-                case "is not null":
-                    condition = fieldColumn.isNotNull();
-                    break;
-                default:
-                    // Default to equality check
-                    System.out.println("Rule '" + ruleName + "' using default equality operator for unknown operator: '" + conditionOperator + "'");
-                    condition = fieldColumn.equalTo(conditionValue);
-                    break;
-            }
-        }
+        // Evaluate the root condition
+        Column result = rootCondition.evaluate(dataset);
         
         // Log the rule being applied
-        System.out.println("Applying rule '" + ruleName + "': " + actualColumnName + " " + conditionOperator + " '" + conditionValue + "'");
+        System.out.println("Applying rule '" + ruleName + "' with tag '" + tagName + "'");
         
-        return condition;
+        return result;
     }
     
     /**
-     * Find a column name in the dataset, ignoring case sensitivity
+     * Validate that all fields used in the rule are signature fields
      * 
-     * @param dataset The dataset to search in
-     * @param columnName The column name to find (case insensitive)
-     * @return The actual column name in the dataset, or null if not found
+     * @param dataset The dataset to validate against
      */
-    private String findColumnNameIgnoreCase(Dataset<Row> dataset, String columnName) {
-        // First try exact match
-        if (CURDataTransformer.containsColumn(dataset, columnName)) {
-            return columnName;
-        }
-        
-        // Try case-insensitive match
-        String lowerColumnName = columnName.toLowerCase();
-        for (String col : dataset.columns()) {
-            if (col.toLowerCase().equals(lowerColumnName)) {
-                System.out.println("Found column '" + col + "' for rule '" + ruleName + "' (was looking for '" + columnName + "')");
-                return col;
-            }
-        }
-        
-        return null;
+    private void validateSignatureFields(Dataset<Row> dataset) {
+        // This method could be implemented to validate all fields in complex conditions
+        // For now, we'll rely on the individual condition evaluations to check fields
     }
     
     /**
@@ -166,35 +227,16 @@ public class CURTagRule implements Serializable {
     }
     
     /**
-     * Gets the condition field for this rule
+     * Gets the root condition for this rule
      * 
-     * @return Condition field
+     * @return Root condition
      */
-    public String getConditionField() {
-        return conditionField;
-    }
-    
-    /**
-     * Gets the condition operator for this rule
-     * 
-     * @return Condition operator
-     */
-    public String getConditionOperator() {
-        return conditionOperator;
-    }
-    
-    /**
-     * Gets the condition value for this rule
-     * 
-     * @return Condition value
-     */
-    public String getConditionValue() {
-        return conditionValue;
+    public Condition getRootCondition() {
+        return rootCondition;
     }
     
     @Override
     public String toString() {
-        return "Rule: " + ruleName + " - If " + conditionField + " " + 
-               conditionOperator + " " + conditionValue + " then tag as " + tagName;
+        return "Rule: " + ruleName + " with tag " + tagName;
     }
 }

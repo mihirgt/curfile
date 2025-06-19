@@ -90,7 +90,9 @@ public class SCDTaggingEngine implements Serializable {
             String tag = props.getProperty("rule." + ruleIndex + ".tag");
             
             if (field != null && operator != null && tag != null) {
-                rules.add(new CURTagRule(ruleName, field, operator, value, tag));
+                // Create a simple condition for the rule
+                CURTagRule.SimpleCondition condition = new CURTagRule.SimpleCondition(field, operator, value);
+                rules.add(new CURTagRule(ruleName, tag, condition));
                 System.out.println("Loaded rule: " + ruleName);
             }
             

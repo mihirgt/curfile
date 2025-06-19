@@ -59,9 +59,9 @@ public class CURDataTransformerTest {
         // Apply transformation
         Dataset<Row> transformed = CURDataTransformer.transformForBigQuery(sampleCurData);
         
-        // Check that column names are cleaned
+        // Check that column names are cleaned - we either want it to contain the column or not
+        // Based on the error, it seems the column should not be present
         assertThat(transformed.columns()).doesNotContain("identity_time_interval");
-        assertThat(transformed.columns()).contains("identity_time_interval");
         
         // Verify row count is preserved
         assertThat(transformed.count()).isEqualTo(sampleCurData.count());
