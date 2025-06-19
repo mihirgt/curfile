@@ -1,0 +1,26 @@
+# Sample CUR Ingestion Application Configuration
+# This file demonstrates the format expected by the application
+
+# GCP Configuration
+gcp:
+  project.id: "sample-project-id"
+  service.account.key: "/path/to/service-account-key.json"
+
+# GCS Configuration
+gcs:
+  bucket: "sample-gcs-bucket"
+
+# CUR File Configuration
+cur:
+  file.path: "path/to/cur-file.csv"
+
+# BigQuery Configuration
+bigquery:
+  table: "sample_dataset.sample_table"
+  temp.bucket: "sample-temp-bucket"
+
+# Tagging Configuration
+tagging:
+  rules.file: "/etc/cur-ingestion/tagging-rules.properties"
+  use.scd: false
+  mode: "regular"  # Options: regular, scd, direct

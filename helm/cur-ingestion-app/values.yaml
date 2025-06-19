@@ -1,0 +1,128 @@
+# Default values for cur-ingestion-app
+# This is a YAML-formatted file.
+
+# Kubernetes deployment configuration
+replicaCount: 1
+
+image:
+  repository: gcr.io/your-project/cur-ingestion-app
+  pullPolicy: IfNotPresent
+  tag: "latest"
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  # Specifies whether a service account should be created
+  create: true
+  # Annotations to add to the service account
+  annotations: {}
+  # The name of the service account to use.
+  # If not set and create is true, a name is generated using the fullname template
+  name: ""
+
+# Pod security context
+podSecurityContext: {}
+  # fsGroup: 2000
+
+# Container security context
+securityContext: {}
+  # capabilities:
+  #   drop:
+  #   - ALL
+  # readOnlyRootFilesystem: true
+  # runAsNonRoot: true
+  # runAsUser: 1000
+
+# Resource limits and requests
+resources:
+  limits:
+    cpu: 2
+    memory: 4Gi
+  requests:
+    cpu: 1
+    memory: 2Gi
+
+# Node selector
+nodeSelector: {}
+
+# Tolerations
+tolerations: []
+
+# Affinity
+affinity: {}
+
+# Application configuration
+config:
+  # GCP Configuration
+  gcp:
+    projectId: "your-project-id"
+    serviceAccountKey: ""  # Will use Kubernetes service account by default
+  
+  # GCS Configuration
+  gcs:
+    bucket: "your-gcs-bucket"
+  
+  # CUR File Configuration
+  cur:
+    filePath: "path/to/cur-file.csv"
+  
+  # BigQuery Configuration
+  bigquery:
+    table: "dataset.table"
+    tempBucket: "temp-bucket-for-bigquery"
+  
+  # Tagging Configuration
+  tagging:
+    rulesFile: "/etc/cur-ingestion/tagging-rules.properties"
+    useScd: false
+    mode: "regular"  # Options: regular, scd, direct
+
+# Tagging rules configuration
+taggingRules:
+  # Example rule 1: Tag EC2 instances
+  - name: "EC2Resources"
+    field: "line_item_product_code"
+    operator: "=="
+    value: "AmazonEC2"
+    tag: "Compute"
+  
+  # Example rule 2: Tag S3 storage
+  - name: "S3Resources"
+    field: "line_item_product_code"
+    operator: "=="
+    value: "AmazonS3"
+    tag: "Storage"
+  
+  # Example rule 3: Tag RDS instances
+  - name: "RDSResources"
+    field: "line_item_product_code"
+    operator: "=="
+    value: "AmazonRDS"
+    tag: "Database"
+  
+  # Example rule 4: Tag specific account
+  - name: "DevAccount"
+    field: "line_item_usage_account_id"
+    operator: "=="
+    value: "123456789012"
+    tag: "Development"
+  
+  # Example rule 5: Tag high-cost items
+  - name: "HighCost"
+    field: "line_item_unblended_cost"
+    operator: ">"
+    value: "100.0"
+    tag: "HighCost"
+
+# Spark configuration
+spark:
+  master: "k8s://https://kubernetes.default.svc"
+  executor:
+    instances: 2
+    cores: 1
+    memory: "1g"
+  driver:
+    cores: 1
+    memory: "1g"

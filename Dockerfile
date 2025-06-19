@@ -8,10 +8,14 @@ RUN apt-get update && \
     rm -rf /var/lib/apt/lists/*
 
 # Copy the application JAR
-COPY target/cur-java-spark-1.0-SNAPSHOT-jar-with-dependencies.jar /opt/spark/jars/
+COPY build/libs/cur-java-spark-*.jar /opt/spark/jars/app.jar
+
+# Create configuration directory
+RUN mkdir -p /etc/cur-ingestion
 
 # Set the working directory
 WORKDIR /opt/spark
 
-# Set default command
-CMD ["sh", "-c", "sleep infinity"]
+# Set default command - run the CUR Ingestion App with the config file
+ENTRYPOINT ["/opt/spark/bin/spark-submit", "--class", "com.example.CURIngestionApp"]
+CMD ["--master", "local[*]", "/opt/spark/jars/app.jar", "/etc/cur-ingestion/config.yaml"]

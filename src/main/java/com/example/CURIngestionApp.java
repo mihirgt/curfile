@@ -12,6 +12,8 @@ import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.PrintWriter;
+import java.nio.file.Files;
+import java.nio.file.Paths;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Properties;
@@ -19,32 +21,50 @@ import java.util.Properties;
 /**
  * CURIngestionApp - A Spark application that reads CUR (Cost and Usage Report) files
  * from Google Cloud Storage and ingests them into BigQuery.
+ * 
+ * This application is designed to be run in a Kubernetes environment using Helm for configuration.
+ * Configuration is read from a YAML file mounted at /etc/cur-ingestion/config.yaml.
  */
 public class CURIngestionApp {
 
+    // Default path for the configuration file when running in Kubernetes
+    private static final String DEFAULT_CONFIG_PATH = "/etc/cur-ingestion/config.yaml";
+    
     public static void main(String[] args) {
-        if (args.length < 4) {
-            System.err.println("Usage: CURIngestionApp <gcs-bucket> <cur-file-path> <project-id> <dataset.table> [config-file] [rules-file] [use-scd-tags]");
-            System.exit(1);
+        // Determine the config file path
+        String configFilePath = DEFAULT_CONFIG_PATH;
+        
+        // Allow overriding the config path via command line
+        if (args.length > 0) {
+            configFilePath = args[0];
         }
-
-        String gcsBucket = args[0];
-        String curFilePath = args[1];
-        String projectId = args[2];
-        String bigQueryTable = args[3];
-        String configFile = args.length > 4 ? args[4] : "gcp-config.properties";
-        String rulesFile = args.length > 5 ? args[5] : "tagging-rules.properties";
-        boolean useSCDTags = args.length > 6 ? Boolean.parseBoolean(args[6]) : false;
-
+        
         try {
-            // Create config file if it doesn't exist
-            createDefaultConfigIfNeeded(configFile, projectId);
+            System.out.println("Loading configuration from: " + configFilePath);
+            
+            // Load application configuration from YAML file
+            AppConfig appConfig = new AppConfig(configFilePath);
+            
+            // Extract configuration values
+            String projectId = appConfig.getProjectId();
+            String gcsBucket = appConfig.getGcsBucket();
+            String curFilePath = appConfig.getCurFilePath();
+            String bigQueryTable = appConfig.getBigQueryTable();
+            String rulesFile = appConfig.getTaggingRulesFile();
+            boolean useSCDTags = appConfig.getUseScdTags();
+            String taggingMode = appConfig.getTaggingMode();
+            
+            // Validate required configuration
+            if (projectId.isEmpty() || gcsBucket.isEmpty() || curFilePath.isEmpty() || bigQueryTable.isEmpty()) {
+                System.err.println("Missing required configuration. Please check your config file.");
+                System.err.println("Required: gcp.project.id, gcs.bucket, cur.file.path, bigquery.table");
+                System.exit(1);
+            }
             
             // Create tagging rules file if it doesn't exist
-            CURTaggingEngine.createDefaultRulesFile(rulesFile);
-            
-            // Load GCP configuration
-            GCPConfig gcpConfig = new GCPConfig(configFile);
+            if (!Files.exists(Paths.get(rulesFile))) {
+                CURTaggingEngine.createDefaultRulesFile(rulesFile);
+            }
             
             // Create Spark configuration
             SparkConf sparkConf = new SparkConf()
@@ -53,8 +73,34 @@ public class CURIngestionApp {
             // Let the master be determined by the environment
             // In Kubernetes, this will be set by the Spark Operator
             
-            // Apply GCP configuration to Spark
-            sparkConf = gcpConfig.configureSparkForGCP(sparkConf);
+            // Configure GCP authentication and settings
+            sparkConf.set("spark.hadoop.fs.gs.impl", "com.google.cloud.hadoop.fs.gcs.GoogleHadoopFileSystem");
+            sparkConf.set("spark.hadoop.fs.AbstractFileSystem.gs.impl", "com.google.cloud.hadoop.fs.gcs.GoogleHadoopFS");
+            
+            // Configure authentication
+            String serviceAccountKeyPath = appConfig.getServiceAccountKeyPath();
+            
+            // Check for Kubernetes service account mount path
+            String k8sServiceAccountPath = "/var/run/secrets/google/key.json";
+            if (Files.exists(Paths.get(k8sServiceAccountPath))) {
+                System.out.println("Using Kubernetes mounted service account key");
+                sparkConf.set("spark.hadoop.google.cloud.auth.service.account.enable", "true");
+                sparkConf.set("spark.hadoop.google.cloud.auth.service.account.json.keyfile", k8sServiceAccountPath);
+            } else if (!serviceAccountKeyPath.isEmpty() && Files.exists(Paths.get(serviceAccountKeyPath))) {
+                System.out.println("Using configured service account key: " + serviceAccountKeyPath);
+                sparkConf.set("spark.hadoop.google.cloud.auth.service.account.enable", "true");
+                sparkConf.set("spark.hadoop.google.cloud.auth.service.account.json.keyfile", serviceAccountKeyPath);
+            } else {
+                // Use default authentication
+                System.out.println("Using default authentication mechanism");
+                sparkConf.set("spark.hadoop.google.cloud.auth.service.account.enable", "false");
+            }
+            
+            // Configure BigQuery temporary bucket
+            String tempBucket = appConfig.getTemporaryBucket();
+            if (!tempBucket.isEmpty()) {
+                sparkConf.set("temporaryGcsBucket", tempBucket);
+            }
             
             // Create Spark session
             SparkSession spark = SparkSession.builder()
@@ -83,13 +129,7 @@ public class CURIngestionApp {
             Dataset<Row> transformedData = CURDataTransformer.transformForBigQuery(curData);
             transformedData = CURDataTransformer.applyDataQualityChecks(transformedData);
             
-            // Determine tagging mode
-            String taggingMode = "regular";
-            if (useSCDTags) {
-                taggingMode = "scd";
-            } else if (args.length > 7 && args[7].equalsIgnoreCase("direct")) {
-                taggingMode = "direct";
-            }
+            // Tagging mode is already determined from the configuration
             
             // Apply tagging based on the mode
             System.out.println("Using tagging mode: " + taggingMode);
@@ -111,7 +151,7 @@ public class CURIngestionApp {
             );
             
             // Write to BigQuery
-            writeToBigQuery(transformedData, projectId, bigQueryTable, gcpConfig.getTemporaryBucket());
+            writeToBigQuery(transformedData, projectId, bigQueryTable, tempBucket);
             
             System.out.println("CUR data successfully ingested into BigQuery table: " + projectId + ":" + bigQueryTable);
             
@@ -123,29 +163,42 @@ public class CURIngestionApp {
     }
     
     /**
-     * Creates a default configuration file if it doesn't exist
+     * Creates a default YAML configuration file
      * 
      * @param configFile Path to the configuration file
-     * @param projectId Google Cloud project ID
      */
-    private static void createDefaultConfigIfNeeded(String configFile, String projectId) throws IOException {
+    public static void createDefaultConfigFile(String configFile) throws IOException {
         File file = new File(configFile);
         if (!file.exists()) {
             System.out.println("Creating default configuration file: " + configFile);
             
-            Properties props = new Properties();
-            props.setProperty("gcp.project.id", projectId);
-            props.setProperty("bigquery.temp.bucket", "temp-bucket-for-bigquery");
-            props.setProperty("gcp.service.account.key", "");
-            
-            try (FileOutputStream fos = new FileOutputStream(file);
-                 PrintWriter pw = new PrintWriter(fos)) {
-                pw.println("# GCP Configuration");
+            try (PrintWriter pw = new PrintWriter(new FileOutputStream(file))) {
+                pw.println("# CUR Ingestion Application Configuration");
                 pw.println("# Created by CURIngestionApp");
-                pw.println("gcp.project.id=" + projectId);
-                pw.println("bigquery.temp.bucket=temp-bucket-for-bigquery");
-                pw.println("# Uncomment and set the path to your service account key file if needed");
-                pw.println("#gcp.service.account.key=/path/to/service-account-key.json");
+                pw.println();
+                pw.println("# GCP Configuration");
+                pw.println("gcp:");
+                pw.println("  project.id: your-project-id");
+                pw.println("  service.account.key: ");
+                pw.println();
+                pw.println("# GCS Configuration");
+                pw.println("gcs:");
+                pw.println("  bucket: your-gcs-bucket");
+                pw.println();
+                pw.println("# CUR File Configuration");
+                pw.println("cur:");
+                pw.println("  file.path: path/to/cur-file.csv");
+                pw.println();
+                pw.println("# BigQuery Configuration");
+                pw.println("bigquery:");
+                pw.println("  table: dataset.table");
+                pw.println("  temp.bucket: temp-bucket-for-bigquery");
+                pw.println();
+                pw.println("# Tagging Configuration");
+                pw.println("tagging:");
+                pw.println("  rules.file: /etc/cur-ingestion/tagging-rules.properties");
+                pw.println("  use.scd: false");
+                pw.println("  mode: regular  # Options: regular, scd, direct");
             }
         }
     }

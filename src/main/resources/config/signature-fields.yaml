@@ -1,0 +1,10 @@
+# Configuration for signature fields used in tagging and resource identification
+# These fields are used for both signature computation and rule definition
+
+signature_fields:
+  - line_item_product_code
+  - line_item_usage_account_id
+  - line_item_usage_type
+  - product_region
+  - resource_id
+  - line_item_line_item_type

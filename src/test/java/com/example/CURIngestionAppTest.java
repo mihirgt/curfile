@@ -66,16 +66,11 @@ public class CURIngestionAppTest {
     @Test
     public void testCreateDefaultConfigIfNeeded() throws Exception {
         // Create a temporary file for testing
-        File tempFile = File.createTempFile("test-config", ".properties");
+        File tempFile = File.createTempFile("test-config", ".yaml");
         tempFile.delete(); // Delete so we can test creation
         
-        // Use reflection to access the private method
-        Method createConfigMethod = CURIngestionApp.class.getDeclaredMethod(
-                "createDefaultConfigIfNeeded", String.class, String.class);
-        createConfigMethod.setAccessible(true);
-        
-        // Call the method
-        createConfigMethod.invoke(null, tempFile.getAbsolutePath(), "test-project-id");
+        // Call the public method
+        CURIngestionApp.createDefaultConfigFile(tempFile.getAbsolutePath());
         
         // Verify the file was created
         assertThat(tempFile.exists()).isTrue();
@@ -85,7 +80,9 @@ public class CURIngestionAppTest {
         System.out.println("Config file content: " + content);
         
         // Verify the file has content (more specific than just checking length)
-        assertThat(content).contains("gcp.project.id=test-project-id");
-        assertThat(content).contains("bigquery.temp.bucket");
+        assertThat(content).contains("gcp:");
+        assertThat(content).contains("project.id:");
+        assertThat(content).contains("bigquery:");
+        assertThat(content).contains("temp.bucket:");
     }
 }
