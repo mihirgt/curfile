@@ -2,6 +2,7 @@ plugins {
     id 'java'
     id 'application'
     id 'com.github.johnrengelman.shadow' version '7.1.2'
+    id 'com.diffplug.spotless' version '6.19.0'
 }
 
 group = 'com.example'
@@ -103,6 +104,26 @@ dependencies {
 
 application {
     mainClass = 'com.example.CURIngestionApp'
+}
+
+// Spotless configuration for code formatting
+spotless {
+    java {
+        // Use Google's Java formatting style
+        googleJavaFormat()
+        
+        // Remove unused imports
+        removeUnusedImports()
+        
+        // Sort imports
+        importOrder('java', 'javax', 'org', 'com', '')
+        
+        // Add standard license header
+        licenseHeader '/* Copyright (c) $YEAR CUR Ingestion App */'
+        
+        // Format all Java files in the project
+        target 'src/*/java/**/*.java'
+    }
 }
 
 tasks.withType(JavaCompile) {
