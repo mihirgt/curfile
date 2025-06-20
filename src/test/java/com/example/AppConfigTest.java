@@ -50,9 +50,6 @@ public class AppConfigTest {
             writer.write("tagging:\n");
             writer.write("  rules:\n");
             writer.write("    file: /etc/cur-ingestion/test-tagging-rules.properties\n");
-            writer.write("  use:\n");
-            writer.write("    scd: true\n");
-            writer.write("  mode: scd\n");
         }
     }
     
@@ -69,14 +66,8 @@ public class AppConfigTest {
         assertThat(config.getTaggingRulesFile()).isEqualTo("/etc/cur-ingestion/test-tagging-rules.properties");
         assertThat(config.getServiceAccountKeyPath()).isEqualTo("/path/to/test-key.json");
         
-        // Test boolean values
-        assertThat(config.getUseScdTags()).isTrue();
-        
         // Test string with default
         assertThat(config.getString("non.existent.key", "default-value")).isEqualTo("default-value");
-        
-        // Test tagging mode
-        assertThat(config.getTaggingMode()).isEqualTo("scd");
     }
     
     @Test

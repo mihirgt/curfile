@@ -170,146 +170,24 @@ public class CURDataTransformer {
         return false;
     }
     
-    /**
-     * Applies tagging rules to the CUR data
-     * 
-     * @param curData CUR data to tag
-     * @param rulesFile Path to the tagging rules file
-     * @return Dataset with tags applied
-     * @throws IOException If the rules file cannot be read
-     */
-    public static Dataset<Row> applyTags(Dataset<Row> curData, String rulesFile) throws IOException {
-        System.out.println("Applying tagging rules from: " + rulesFile);
-        
-        // Create tagging engine and load rules
-        CURTaggingEngine taggingEngine = new CURTaggingEngine(rulesFile);
-        
-        // Apply tags to the dataset
-        Dataset<Row> taggedData = taggingEngine.applyTags(curData);
-        
-        System.out.println("Applied " + taggingEngine.getRules().size() + " tagging rules");
-        
-        return taggedData;
-    }
+    // SCD tagging has been removed to keep only direct tagging
     
     /**
-     * Applies SCD Type-2 tagging rules to the CUR data
-     * 
-     * @param curData CUR data to tag
-     * @param rulesFile Path to the tagging rules file
-     * @return Dataset with SCD Type-2 tags applied
-     * @throws IOException If the rules file cannot be read
-     */
-    public static Dataset<Row> applySCDTags(Dataset<Row> curData, String rulesFile) throws IOException {
-        System.out.println("Applying SCD Type-2 tagging rules from: " + rulesFile);
-        
-        // Create SCD tagging engine and load rules
-        SCDTaggingEngine scdTaggingEngine = new SCDTaggingEngine(rulesFile);
-        
-        // Apply SCD tags to the dataset with current timestamp
-        java.sql.Timestamp currentTimestamp = new java.sql.Timestamp(System.currentTimeMillis());
-        Dataset<Row> taggedData = scdTaggingEngine.applySCDTags(curData, currentTimestamp);
-        
-        System.out.println("Applied " + scdTaggingEngine.getRules().size() + " SCD tagging rules");
-        System.out.println("Tags effective from: " + currentTimestamp);
-        
-        return taggedData;
-    }
-    
-    /**
-     * Updates SCD Type-2 tags in an existing dataset
-     * 
-     * @param existingData Existing dataset with SCD Type-2 structure
-     * @param rulesFile Path to the tagging rules file
-     * @param spark SparkSession for creating DataFrames
-     * @return Updated dataset with historical and current records
-     * @throws IOException If the rules file cannot be read
-     */
-    public static Dataset<Row> updateSCDTags(Dataset<Row> existingData, String rulesFile, SparkSession spark) throws IOException {
-        System.out.println("Updating SCD Type-2 tags from: " + rulesFile);
-        
-        // Create SCD tagging engine and load rules
-        SCDTaggingEngine scdTaggingEngine = new SCDTaggingEngine(rulesFile);
-        
-        // Update tags with current timestamp
-        java.sql.Timestamp currentTimestamp = new java.sql.Timestamp(System.currentTimeMillis());
-        Dataset<Row> updatedData = scdTaggingEngine.updateSCDTags(existingData, currentTimestamp, spark);
-        
-        System.out.println("Updated SCD tags with " + scdTaggingEngine.getRules().size() + " rules");
-        System.out.println("New tags effective from: " + currentTimestamp);
-        
-        return updatedData;
-    }
-    
-    /**
-     * Merges a new dataset with an existing SCD Type-2 dataset
-     * 
-     * @param existingData Existing dataset with SCD Type-2 structure
-     * @param newData New dataset to merge in
-     * @param rulesFile Path to the tagging rules file
-     * @param spark SparkSession for creating DataFrames
-     * @return Merged dataset with historical and current records
-     * @throws IOException If the rules file cannot be read
-     */
-    public static Dataset<Row> mergeSCDTags(Dataset<Row> existingData, Dataset<Row> newData, 
-                                          String rulesFile, SparkSession spark) throws IOException {
-        System.out.println("Merging new data with SCD Type-2 tags from: " + rulesFile);
-        
-        // Create SCD tagging engine and load rules
-        SCDTaggingEngine scdTaggingEngine = new SCDTaggingEngine(rulesFile);
-        
-        // Merge datasets with current timestamp
-        java.sql.Timestamp currentTimestamp = new java.sql.Timestamp(System.currentTimeMillis());
-        Dataset<Row> mergedData = scdTaggingEngine.mergeSCDTags(existingData, newData, currentTimestamp, spark);
-        
-        System.out.println("Merged data with " + scdTaggingEngine.getRules().size() + " SCD tagging rules");
-        System.out.println("New tags effective from: " + currentTimestamp);
-        
-        return mergedData;
-    }
-    
-    /**
-     * Applies direct tagging rules to the dataset (simplified version that doesn't return resource tags history)
+     * Applies direct tagging rules to the dataset and returns both tagged data and resource tag history
      * 
      * @param curData The dataset to tag
      * @param rulesFile Path to the tagging rules file
-     * @return Dataset with direct tags applied
+     * @return Tuple2 containing (tagged CUR data, resource tags history)
      * @throws IOException If the rules file cannot be read
      */
-    public static Dataset<Row> applyDirectTags(Dataset<Row> curData, String rulesFile) throws IOException {
+    public static Tuple2<Dataset<Row>, Dataset<Row>> applyDirectTags(Dataset<Row> curData, String rulesFile) throws IOException {
         System.out.println("Applying direct tagging rules from: " + rulesFile);
         
         // Create direct tagging engine and load rules
         DirectTaggingEngine taggingEngine = new DirectTaggingEngine(rulesFile);
         
-        // Apply direct tagging (just return the tagged CUR data, not the resource tags history)
+        // Apply direct tagging and get both tagged data and resource tags history
         Tuple2<Dataset<Row>, Dataset<Row>> result = taggingEngine.processCURWithDirectTags(curData, curData.sparkSession());
-        Dataset<Row> taggedData = result._1();
-        
-        System.out.println("Applied " + taggingEngine.getTaggingEngine().getRules().size() + " direct tagging rules");
-        System.out.println("Created resource tags history with " + result._2().count() + " records (not returned)");
-        
-        return taggedData;
-    }
-    
-    /**
-     * Applies direct tagging to CUR data with embedded tags and separate history tracking
-     * 
-     * @param curData CUR data to tag
-     * @param rulesFile Path to the tagging rules file
-     * @param spark SparkSession for operations
-     * @return Tuple2 containing (tagged CUR data, resource tags history)
-     * @throws IOException If the rules file cannot be read
-     */
-    public static Tuple2<Dataset<Row>, Dataset<Row>> applyDirectTags(
-            Dataset<Row> curData, String rulesFile, SparkSession spark) throws IOException {
-        System.out.println("Applying direct tagging with history tracking from: " + rulesFile);
-        
-        // Create direct tagging engine and load rules
-        DirectTaggingEngine taggingEngine = new DirectTaggingEngine(rulesFile);
-        
-        // Process CUR data with direct tagging
-        Tuple2<Dataset<Row>, Dataset<Row>> result = taggingEngine.processCURWithDirectTags(curData, spark);
         
         System.out.println("Applied " + taggingEngine.getTaggingEngine().getRules().size() + " direct tagging rules");
         System.out.println("Created resource tags history with " + result._2().count() + " records");
@@ -317,29 +195,5 @@ public class CURDataTransformer {
         return result;
     }
     
-    /**
-     * Updates direct tags for CUR data when rules change
-     * 
-     * @param curData CUR data with existing tags
-     * @param resourceTags Existing resource tags history
-     * @param rulesFile Path to the updated tagging rules file
-     * @param spark SparkSession for operations
-     * @return Tuple2 containing (updated CUR data, updated resource tags history)
-     * @throws IOException If the rules file cannot be read
-     */
-    public static Tuple2<Dataset<Row>, Dataset<Row>> updateDirectTags(
-            Dataset<Row> curData, Dataset<Row> resourceTags, String rulesFile, SparkSession spark) throws IOException {
-        System.out.println("Updating direct tags with history tracking from: " + rulesFile);
-        
-        // Create direct tagging engine and load rules
-        DirectTaggingEngine taggingEngine = new DirectTaggingEngine(rulesFile);
-        
-        // Update tags
-        Tuple2<Dataset<Row>, Dataset<Row>> result = taggingEngine.updateCURDataWithNewTags(curData, resourceTags, spark);
-        
-        System.out.println("Updated tags with " + taggingEngine.getTaggingEngine().getRules().size() + " rules");
-        System.out.println("Updated resource tags history now has " + result._2().count() + " records");
-        
-        return result;
-    }
+    // Additional direct tagging methods have been removed as they're not used in the simplified direct tagging mode
 }

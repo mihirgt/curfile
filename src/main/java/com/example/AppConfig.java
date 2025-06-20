@@ -203,32 +203,7 @@ public class AppConfig {
         return value != null ? value : "/etc/cur-ingestion/tagging-rules.properties";
     }
     
-    /**
-     * Gets whether to use SCD tagging
-     */
-    public boolean getUseScdTags() {
-        // Try both formats
-        String value = getString("tagging.use.scd", null);
-        if (value == null) {
-            @SuppressWarnings("unchecked")
-            Map<String, Object> taggingConfig = config != null ? (Map<String, Object>) config.get("tagging") : null;
-            if (taggingConfig != null) {
-                @SuppressWarnings("unchecked")
-                Map<String, Object> useConfig = (Map<String, Object>) taggingConfig.get("use");
-                if (useConfig != null && useConfig.get("scd") != null) {
-                    value = useConfig.get("scd").toString();
-                }
-            }
-        }
-        return value != null ? Boolean.parseBoolean(value) : false;
-    }
-    
-    /**
-     * Gets the tagging mode
-     */
-    public String getTaggingMode() {
-        return getString("tagging.mode", "regular");
-    }
+    // Removed tagging mode options since we're only using direct tagging
     
     /**
      * Gets the path to the GCP service account key file

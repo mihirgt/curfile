@@ -73,13 +73,11 @@ config:
     table: "dataset.table"
     tempBucket: "temp-bucket-for-bigquery"
   
-  # Tagging Configuration
+  # Tagging configuration
   tagging:
     rulesFile: "/etc/cur-ingestion/tagging-rules.properties"
-    useScd: false
-    mode: "regular"  # Options: regular, scd, direct
-
-# Tagging rules configuration
+  
+  # Tagging rules configuration
 taggingRules:
   # Example rule 1: Tag EC2 instances
   - name: "EC2Resources"

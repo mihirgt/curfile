@@ -11,11 +11,18 @@ import org.apache.spark.sql.types.StructType;
 import org.apache.spark.sql.types.StructField;
 import scala.Tuple2;
 
+import java.io.FileInputStream;
 import java.io.IOException;
 import java.io.Serializable;
 import java.sql.Timestamp;
+import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
 import java.util.Properties;
+import java.util.Set;
 import java.util.stream.Stream;
 
 /**
@@ -31,13 +38,15 @@ public class DirectTaggingEngine implements Serializable {
     // Loaded from YAML configuration file via ConfigManager
     private static final String[] SIGNATURE_FIELDS = ConfigManager.loadSignatureFields();
     
-    private CURTaggingEngine taggingEngine;
+    private Properties rules;
+    private List<CURTagRule> tagRules;
     
     /**
      * Creates a new DirectTaggingEngine with no rules
      */
     public DirectTaggingEngine() {
-        this.taggingEngine = new CURTaggingEngine();
+        this.rules = new Properties();
+        this.tagRules = new ArrayList<>();
     }
     
     /**
@@ -47,7 +56,98 @@ public class DirectTaggingEngine implements Serializable {
      * @throws IOException If the rules file cannot be read
      */
     public DirectTaggingEngine(String rulesFile) throws IOException {
-        this.taggingEngine = new CURTaggingEngine(rulesFile);
+        this.rules = new Properties();
+        this.tagRules = new ArrayList<>();
+        loadRules(rulesFile);
+    }
+    
+    /**
+     * Loads tagging rules from a properties file
+     * 
+     * @param rulesFile Path to the rules file
+     * @throws IOException If the file cannot be read
+     */
+    private void loadRules(String rulesFile) throws IOException {
+        try (FileInputStream fis = new FileInputStream(rulesFile)) {
+            rules.load(fis);
+            System.out.println("Loaded tagging rules from " + rulesFile);
+            
+            // Parse rules from properties
+            Map<String, CURTagRule> ruleMap = new HashMap<>();
+            
+            // Find all rule names
+            Set<String> ruleNumbers = new HashSet<>();
+            for (String key : rules.stringPropertyNames()) {
+                if (key.startsWith("rule.") && key.endsWith(".name")) {
+                    String ruleNumber = key.substring(5, key.length() - 5);
+                    ruleNumbers.add(ruleNumber);
+                }
+            }
+            
+            // Process each rule
+            for (String ruleNumber : ruleNumbers) {
+                String nameKey = "rule." + ruleNumber + ".name";
+                String fieldKey = "rule." + ruleNumber + ".field";
+                String operatorKey = "rule." + ruleNumber + ".operator";
+                String valueKey = "rule." + ruleNumber + ".value";
+                String tagKey = "rule." + ruleNumber + ".tag";
+                
+                String name = rules.getProperty(nameKey);
+                String field = rules.getProperty(fieldKey);
+                String operator = rules.getProperty(operatorKey);
+                String value = rules.getProperty(valueKey);
+                String tag = rules.getProperty(tagKey);
+                
+                if (name != null && field != null && operator != null && value != null && tag != null) {
+                    CURTagRule rule = new CURTagRule(name, field, operator, value, tag);
+                    tagRules.add(rule);
+                    System.out.println("Loaded rule: " + name);
+                }
+            }
+            
+            System.out.println("Loaded " + tagRules.size() + " tagging rules from " + rulesFile);
+        }
+    }
+    
+    /**
+     * Creates a default tagging rules file with example rules
+     * 
+     * @param rulesFile Path to create the default rules file
+     * @throws IOException If the file cannot be created
+     */
+    public static void createDefaultRulesFile(String rulesFile) throws IOException {
+        Properties props = new Properties();
+        
+        // Rule 1: Tag EC2 instances with Compute tag
+        props.setProperty("rule.1.name", "EC2Resources");
+        props.setProperty("rule.1.field", "line_item_product_code");
+        props.setProperty("rule.1.operator", "==");
+        props.setProperty("rule.1.value", "AmazonEC2");
+        props.setProperty("rule.1.tag", "Compute");
+        
+        // Rule 2: Tag S3 resources with Storage tag
+        props.setProperty("rule.2.name", "S3Resources");
+        props.setProperty("rule.2.field", "line_item_product_code");
+        props.setProperty("rule.2.operator", "==");
+        props.setProperty("rule.2.value", "AmazonS3");
+        props.setProperty("rule.2.tag", "Storage");
+        
+        // Rule 3: Tag RDS resources with Database tag
+        props.setProperty("rule.3.name", "RDSResources");
+        props.setProperty("rule.3.field", "line_item_product_code");
+        props.setProperty("rule.3.operator", "==");
+        props.setProperty("rule.3.value", "AmazonRDS");
+        props.setProperty("rule.3.tag", "Database");
+        
+        // Create parent directory if it doesn't exist
+        java.nio.file.Path path = java.nio.file.Paths.get(rulesFile);
+        java.nio.file.Files.createDirectories(path.getParent());
+        
+        // Save properties to file
+        try (java.io.FileOutputStream out = new java.io.FileOutputStream(rulesFile)) {
+            props.store(out, "Default tagging rules for CUR ingestion");
+            System.out.println("Created default tagging rules file: " + rulesFile);
+        }
     }
     
     /**
@@ -75,7 +175,7 @@ public class DirectTaggingEngine implements Serializable {
         System.out.println("Sample unique resources:");
         uniqueResources.show(3);
         
-        Dataset<Row> taggedResources = taggingEngine.applyTags(uniqueResources);
+        Dataset<Row> taggedResources = applyTagsToDataset(uniqueResources);
         
         System.out.println("Tagged resources after applying tags:");
         taggedResources.select("line_item_product_code", "line_item_line_item_type", "line_item_usage_type", "tags").show(5);
@@ -257,7 +357,7 @@ public class DirectTaggingEngine implements Serializable {
         Dataset<Row> uniqueResources = extractUniqueResources(enrichedCurData);
         
         // Step 3: Apply new tags based on current rules
-        Dataset<Row> newTaggedResources = taggingEngine.applyTags(uniqueResources);
+        Dataset<Row> newTaggedResources = applyTagsToDataset(uniqueResources);
         
         // Apply the ComputeUpdated tag directly to EC2 resources with BoxUsage:t2.micro usage type
         // This ensures the tags are correctly populated in newTaggedResources
@@ -365,9 +465,48 @@ public class DirectTaggingEngine implements Serializable {
     }
     
     /**
+     * Apply tags to a dataset based on the loaded rules
+     * 
+     * @param dataset The dataset to tag
+     * @return Dataset with tags applied
+     */
+    public Dataset<Row> applyTagsToDataset(Dataset<Row> dataset) {
+        // Create an array column to hold tags
+        Dataset<Row> result = dataset.withColumn("tags", functions.array());
+        
+        // Apply each rule
+        for (CURTagRule rule : tagRules) {
+            // Get the tag name
+            String tagName = rule.getTagName();
+            
+            // Apply the rule's condition to filter matching rows
+            Column condition = rule.getCondition().evaluate(dataset);
+            
+            // Add the tag to matching rows
+            result = result.withColumn(
+                "tags", 
+                functions.when(condition, 
+                    functions.array_union(functions.col("tags"), functions.array(functions.lit(tagName))))
+                .otherwise(functions.col("tags"))
+            );
+        }
+        
+        return result;
+    }
+    
+    /**
      * Get the tagging engine used by this DirectTaggingEngine
      */
-    public CURTaggingEngine getTaggingEngine() {
-        return taggingEngine;
+    public DirectTaggingEngine getTaggingEngine() {
+        return this;
+    }
+    
+    /**
+     * Get the tagging rules
+     * 
+     * @return List of tagging rules
+     */
+    public List<CURTagRule> getRules() {
+        return tagRules;
     }
 }

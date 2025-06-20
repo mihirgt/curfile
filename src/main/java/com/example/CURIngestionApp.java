@@ -18,6 +18,8 @@ import java.util.HashMap;
 import java.util.Map;
 import java.util.Properties;
 
+import scala.Tuple2;
+
 /**
  * CURIngestionApp - A Spark application that reads CUR (Cost and Usage Report) files
  * from Google Cloud Storage and ingests them into BigQuery.
@@ -51,8 +53,6 @@ public class CURIngestionApp {
             String curFilePath = appConfig.getCurFilePath();
             String bigQueryTable = appConfig.getBigQueryTable();
             String rulesFile = appConfig.getTaggingRulesFile();
-            boolean useSCDTags = appConfig.getUseScdTags();
-            String taggingMode = appConfig.getTaggingMode();
             
             // Validate required configuration
             if (projectId.isEmpty() || gcsBucket.isEmpty() || curFilePath.isEmpty() || bigQueryTable.isEmpty()) {
@@ -63,7 +63,7 @@ public class CURIngestionApp {
             
             // Create tagging rules file if it doesn't exist
             if (!Files.exists(Paths.get(rulesFile))) {
-                CURTaggingEngine.createDefaultRulesFile(rulesFile);
+                DirectTaggingEngine.createDefaultRulesFile(rulesFile);
             }
             
             // Create Spark configuration
@@ -131,27 +131,31 @@ public class CURIngestionApp {
             
             // Tagging mode is already determined from the configuration
             
-            // Apply tagging based on the mode
-            System.out.println("Using tagging mode: " + taggingMode);
-            if (taggingMode.equalsIgnoreCase("scd")) {
-                // Apply SCD tagging
-                transformedData = CURDataTransformer.applySCDTags(transformedData, rulesFile);
-            } else if (taggingMode.equalsIgnoreCase("direct")) {
-                // Apply direct tagging
-                transformedData = CURDataTransformer.applyDirectTags(transformedData, rulesFile);
-            } else {
-                // Apply regular tagging (default)
-                transformedData = CURDataTransformer.applyTags(transformedData, rulesFile);
-            }
+            // Apply direct tagging and get both tagged data and resource tag history
+            System.out.println("Using direct tagging mode");
+            Tuple2<Dataset<Row>, Dataset<Row>> taggingResult = CURDataTransformer.applyDirectTags(transformedData, rulesFile);
+            transformedData = taggingResult._1(); // Tagged CUR data
+            Dataset<Row> resourceTagHistory = taggingResult._2(); // Resource tag history
             
-            // Add processing timestamp
+            // Add processing timestamp to both datasets
             transformedData = transformedData.withColumn(
                 "ingestion_timestamp", 
                 functions.current_timestamp()
             );
             
-            // Write to BigQuery
+            resourceTagHistory = resourceTagHistory.withColumn(
+                "ingestion_timestamp", 
+                functions.current_timestamp()
+            );
+            
+            // Write tagged CUR data to BigQuery
+            System.out.println("Writing tagged CUR data to BigQuery");
             writeToBigQuery(transformedData, projectId, bigQueryTable, tempBucket);
+            
+            // Write resource tag history to its own BigQuery table
+            String resourceTagsTable = bigQueryTable + "_resource_tags";
+            System.out.println("Writing resource tag history to BigQuery table: " + resourceTagsTable);
+            writeToBigQuery(resourceTagHistory, projectId, resourceTagsTable, tempBucket);
             
             System.out.println("CUR data successfully ingested into BigQuery table: " + projectId + ":" + bigQueryTable);
             
@@ -197,8 +201,6 @@ public class CURIngestionApp {
                 pw.println("# Tagging Configuration");
                 pw.println("tagging:");
                 pw.println("  rules.file: /etc/cur-ingestion/tagging-rules.properties");
-                pw.println("  use.scd: false");
-                pw.println("  mode: regular  # Options: regular, scd, direct");
             }
         }
     }
@@ -256,7 +258,8 @@ public class CURIngestionApp {
     }
     
     /**
-     * Write the processed data to BigQuery
+     * Write the processed data to BigQuery using an upsert operation
+     * This handles cases where the same row might exist with different tags or cost values
      * 
      * @param data Dataset<Row> to write to BigQuery
      * @param projectId Google Cloud project ID
@@ -267,18 +270,137 @@ public class CURIngestionApp {
         System.out.println("Writing data to BigQuery table: " + projectId + ":" + tableId);
         System.out.println("Using temporary bucket: " + tempBucket);
         
-        // Configure BigQuery options
-        Map<String, String> options = new HashMap<>();
-        options.put("table", tableId);
-        options.put("temporaryGcsBucket", tempBucket);
-        options.put("partitionField", "ingestion_timestamp"); // Optional: enable partitioning
-        options.put("partitionType", "DAY"); // Optional: partition by day
+        // Split tableId into dataset and table name
+        String[] parts = tableId.split("\\.");
+        if (parts.length != 2) {
+            throw new IllegalArgumentException("TableId must be in format 'dataset.table'");
+        }
+        String datasetId = parts[0];
+        String tableName = parts[1];
         
-        // Write to BigQuery
-        data.write()
-            .format("bigquery")
-            .options(options)
-            .mode(SaveMode.Append) // Use Append, Overwrite, ErrorIfExists, or Ignore as needed
-            .save(projectId);
+        // Create a temporary table name for staging the data
+        String tempTableName = tableName + "_temp_" + System.currentTimeMillis();
+        String tempTableId = datasetId + "." + tempTableName;
+        
+        try {
+            // Configure BigQuery options for the temporary table
+            Map<String, String> tempOptions = new HashMap<>();
+            tempOptions.put("table", tempTableId);
+            tempOptions.put("temporaryGcsBucket", tempBucket);
+            
+            // Write to temporary BigQuery table
+            System.out.println("Writing to temporary table: " + tempTableId);
+            data.write()
+                .format("bigquery")
+                .options(tempOptions)
+                .mode(SaveMode.Overwrite)
+                .save(projectId);
+            
+            // Define the key columns that identify unique rows
+            // These are the columns that should be used to identify the same logical row
+            // Adjust these based on your CUR data structure
+            String[] keyColumns = {
+                "identity_line_item_id",
+                "line_item_usage_account_id",
+                "line_item_usage_start_date",
+                "line_item_usage_end_date",
+                "line_item_product_code",
+                "line_item_usage_type",
+                "line_item_operation",
+                "line_item_resource_id"
+            };
+            
+            // Create the merge SQL statement
+            StringBuilder mergeSQL = new StringBuilder();
+            mergeSQL.append("MERGE `").append(projectId).append(".").append(tableId).append("` AS target ")
+                  .append("USING `").append(projectId).append(".").append(tempTableId).append("` AS source ")
+                  .append("ON ");
+            
+            // Add the join conditions for key columns
+            for (int i = 0; i < keyColumns.length; i++) {
+                if (i > 0) {
+                    mergeSQL.append(" AND ");
+                }
+                mergeSQL.append("target.").append(keyColumns[i]).append(" = source.").append(keyColumns[i]);
+            }
+            
+            // When matched, update the existing row
+            mergeSQL.append(" WHEN MATCHED THEN UPDATE SET ");
+            
+            // Get all column names from the dataset
+            String[] allColumns = data.columns();
+            boolean firstColumn = true;
+            
+            for (String column : allColumns) {
+                // Skip key columns in the update clause
+                boolean isKeyColumn = false;
+                for (String keyColumn : keyColumns) {
+                    if (keyColumn.equalsIgnoreCase(column)) {
+                        isKeyColumn = true;
+                        break;
+                    }
+                }
+                
+                if (!isKeyColumn) {
+                    if (!firstColumn) {
+                        mergeSQL.append(", ");
+                    } else {
+                        firstColumn = false;
+                    }
+                    mergeSQL.append("target.").append(column).append(" = source.").append(column);
+                }
+            }
+            
+            // When not matched, insert a new row
+            mergeSQL.append(" WHEN NOT MATCHED THEN INSERT (");
+            
+            // Add all column names
+            for (int i = 0; i < allColumns.length; i++) {
+                if (i > 0) {
+                    mergeSQL.append(", ");
+                }
+                mergeSQL.append(allColumns[i]);
+            }
+            
+            mergeSQL.append(") VALUES (");
+            
+            // Add all source values
+            for (int i = 0; i < allColumns.length; i++) {
+                if (i > 0) {
+                    mergeSQL.append(", ");
+                }
+                mergeSQL.append("source.").append(allColumns[i]);
+            }
+            
+            mergeSQL.append(")");
+            
+            // Execute the merge SQL
+            System.out.println("Executing merge operation...");
+            SparkSession spark = SparkSession.active();
+            spark.sql(mergeSQL.toString());
+            
+            // Drop the temporary table
+            System.out.println("Dropping temporary table: " + tempTableId);
+            spark.sql("DROP TABLE IF EXISTS `" + projectId + "." + tempTableId + "`");
+            
+            System.out.println("Upsert operation completed successfully");
+        } catch (Exception e) {
+            System.err.println("Error during upsert operation: " + e.getMessage());
+            e.printStackTrace();
+            
+            // Fallback to direct append if merge fails
+            System.out.println("Falling back to direct append mode");
+            Map<String, String> options = new HashMap<>();
+            options.put("table", tableId);
+            options.put("temporaryGcsBucket", tempBucket);
+            options.put("partitionField", "ingestion_timestamp");
+            options.put("partitionType", "DAY");
+            
+            data.write()
+                .format("bigquery")
+                .options(options)
+                .mode(SaveMode.Append)
+                .save(projectId);
+        }
     }
 }

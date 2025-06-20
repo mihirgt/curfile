@@ -22,6 +22,30 @@ public class CURTagRule implements Serializable {
     private Condition rootCondition;
     
     /**
+     * Creates a new rule with a simple condition
+     * 
+     * @param name Rule name
+     * @param field Field to check
+     * @param operator Operator to use (==, !=, etc.)
+     * @param value Value to compare against
+     * @param tag Tag to apply when condition is met
+     */
+    public CURTagRule(String name, String field, String operator, String value, String tag) {
+        this.ruleName = name;
+        this.tagName = tag;
+        this.rootCondition = new SimpleCondition(field, operator, value);
+    }
+    
+    /**
+     * Gets the root condition
+     * 
+     * @return The root condition
+     */
+    public Condition getCondition() {
+        return rootCondition;
+    }
+    
+    /**
      * Base class for conditions
      */
     public static abstract class Condition implements Serializable {
