@@ -3,7 +3,10 @@ package com.example;
 
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Properties;
+import java.util.Set;
 
 import org.apache.spark.sql.Dataset;
 import org.apache.spark.sql.Row;
@@ -182,16 +185,64 @@ public class CURDataTransformer {
    * history
    *
    * @param curData The dataset to tag
-   * @param rulesFile Path to the tagging rules file
+   * @param rulesFile Path to the tagging rules file, can be empty to use bundled rules
    * @return Tuple2 containing (tagged CUR data, resource tags history)
    * @throws IOException If the rules file cannot be read
    */
   public static Tuple2<Dataset<Row>, Dataset<Row>> applyDirectTags(
       Dataset<Row> curData, String rulesFile) throws IOException {
-    System.out.println("Applying direct tagging rules from: " + rulesFile);
+    DirectTaggingEngine taggingEngine;
+    
+    if (rulesFile == null || rulesFile.isEmpty()) {
+      // Use the default bundled rules if no rules file is specified
+      System.out.println("No rules file specified, using bundled default rules");
+      taggingEngine = new DirectTaggingEngine();
+      // Load the bundled rules directly into the engine
+      try {
+        // Get the bundled rules
+        Properties bundledRules = DirectTaggingEngine.loadBundledRules();
+        // Add them to the engine's rules
+        taggingEngine.getRulesProperties().putAll(bundledRules);
+        
+        // Parse the rules to create tag rules
+        // This is a simplified version of the loadRules method
+        Set<String> ruleNumbers = new HashSet<>();
+        for (String key : bundledRules.stringPropertyNames()) {
+          if (key.startsWith("rule.") && key.endsWith(".name")) {
+            String ruleNumber = key.substring(5, key.length() - 5);
+            ruleNumbers.add(ruleNumber);
+          }
+        }
+        
+        // Process each rule
+        for (String ruleNumber : ruleNumbers) {
+          String nameKey = "rule." + ruleNumber + ".name";
+          String fieldKey = "rule." + ruleNumber + ".field";
+          String operatorKey = "rule." + ruleNumber + ".operator";
+          String valueKey = "rule." + ruleNumber + ".value";
+          String tagKey = "rule." + ruleNumber + ".tag";
 
-    // Create direct tagging engine and load rules
-    DirectTaggingEngine taggingEngine = new DirectTaggingEngine(rulesFile);
+          String name = bundledRules.getProperty(nameKey);
+          String field = bundledRules.getProperty(fieldKey);
+          String operator = bundledRules.getProperty(operatorKey);
+          String value = bundledRules.getProperty(valueKey);
+          String tag = bundledRules.getProperty(tagKey);
+
+          if (name != null && field != null && operator != null && value != null && tag != null) {
+            CURTagRule rule = new CURTagRule(name, field, operator, value, tag);
+            taggingEngine.getRules().add(rule);
+            System.out.println("Loaded bundled rule: " + name);
+          }
+        }
+      } catch (IOException e) {
+        System.err.println("Error loading bundled rules: " + e.getMessage());
+        // Fall back to empty rules if loading fails
+      }
+    } else {
+      System.out.println("Applying direct tagging rules from: " + rulesFile);
+      // Create direct tagging engine and load rules from the specified file
+      taggingEngine = new DirectTaggingEngine(rulesFile);
+    }
 
     // Apply direct tagging and get both tagged data and resource tags history
     Tuple2<Dataset<Row>, Dataset<Row>> result =

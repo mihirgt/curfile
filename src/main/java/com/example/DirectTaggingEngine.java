@@ -2,7 +2,9 @@
 package com.example;
 
 import java.io.FileInputStream;
+import java.io.FileOutputStream;
 import java.io.IOException;
+import java.io.InputStream;
 import java.io.Serializable;
 import java.sql.Timestamp;
 import java.util.ArrayList;
@@ -64,86 +66,98 @@ public class DirectTaggingEngine implements Serializable {
    * @throws IOException If the file cannot be read
    */
   private void loadRules(String rulesFile) throws IOException {
-    try (FileInputStream fis = new FileInputStream(rulesFile)) {
-      rules.load(fis);
-      System.out.println("Loaded tagging rules from " + rulesFile);
-
-      // Parse rules from properties
-      Map<String, CURTagRule> ruleMap = new HashMap<>();
-
-      // Find all rule names
-      Set<String> ruleNumbers = new HashSet<>();
-      for (String key : rules.stringPropertyNames()) {
-        if (key.startsWith("rule.") && key.endsWith(".name")) {
-          String ruleNumber = key.substring(5, key.length() - 5);
-          ruleNumbers.add(ruleNumber);
-        }
+    // Check if the file exists, if not try to load from bundled resources
+    java.nio.file.Path path = java.nio.file.Paths.get(rulesFile);
+    if (!java.nio.file.Files.exists(path)) {
+      rules = loadBundledRules();
+      System.out.println("Rules file not found at " + rulesFile + ", using bundled rules instead");
+    } else {
+      try (FileInputStream fis = new FileInputStream(rulesFile)) {
+        rules.load(fis);
+        System.out.println("Loaded tagging rules from " + rulesFile);
       }
-
-      // Process each rule
-      for (String ruleNumber : ruleNumbers) {
-        String nameKey = "rule." + ruleNumber + ".name";
-        String fieldKey = "rule." + ruleNumber + ".field";
-        String operatorKey = "rule." + ruleNumber + ".operator";
-        String valueKey = "rule." + ruleNumber + ".value";
-        String tagKey = "rule." + ruleNumber + ".tag";
-
-        String name = rules.getProperty(nameKey);
-        String field = rules.getProperty(fieldKey);
-        String operator = rules.getProperty(operatorKey);
-        String value = rules.getProperty(valueKey);
-        String tag = rules.getProperty(tagKey);
-
-        if (name != null && field != null && operator != null && value != null && tag != null) {
-          CURTagRule rule = new CURTagRule(name, field, operator, value, tag);
-          tagRules.add(rule);
-          System.out.println("Loaded rule: " + name);
-        }
-      }
-
-      System.out.println("Loaded " + tagRules.size() + " tagging rules from " + rulesFile);
     }
+
+    // Parse rules from properties
+    Map<String, CURTagRule> ruleMap = new HashMap<>();
+
+    // Find all rule names
+    Set<String> ruleNumbers = new HashSet<>();
+    for (String key : rules.stringPropertyNames()) {
+      if (key.startsWith("rule.") && key.endsWith(".name")) {
+        String ruleNumber = key.substring(5, key.length() - 5);
+        ruleNumbers.add(ruleNumber);
+      }
+    }
+
+    // Process each rule
+    for (String ruleNumber : ruleNumbers) {
+      String nameKey = "rule." + ruleNumber + ".name";
+      String fieldKey = "rule." + ruleNumber + ".field";
+      String operatorKey = "rule." + ruleNumber + ".operator";
+      String valueKey = "rule." + ruleNumber + ".value";
+      String tagKey = "rule." + ruleNumber + ".tag";
+
+      String name = rules.getProperty(nameKey);
+      String field = rules.getProperty(fieldKey);
+      String operator = rules.getProperty(operatorKey);
+      String value = rules.getProperty(valueKey);
+      String tag = rules.getProperty(tagKey);
+
+      if (name != null && field != null && operator != null && value != null && tag != null) {
+        CURTagRule rule = new CURTagRule(name, field, operator, value, tag);
+        tagRules.add(rule);
+        System.out.println("Loaded rule: " + name);
+      }
+    }
+
+    System.out.println("Loaded " + tagRules.size() + " tagging rules");
   }
 
   /**
-   * Creates a default tagging rules file with example rules
+   * Path to the default tagging rules file bundled with the application
+   */
+  private static final String DEFAULT_RULES_RESOURCE = "/config/default-tagging-rules.properties";
+
+  /**
+   * Creates a default tagging rules file by copying the bundled resource file
    *
    * @param rulesFile Path to create the default rules file
    * @throws IOException If the file cannot be created
    */
   public static void createDefaultRulesFile(String rulesFile) throws IOException {
-    Properties props = new Properties();
-
-    // Rule 1: Tag EC2 instances with Compute tag
-    props.setProperty("rule.1.name", "EC2Resources");
-    props.setProperty("rule.1.field", "line_item_product_code");
-    props.setProperty("rule.1.operator", "==");
-    props.setProperty("rule.1.value", "AmazonEC2");
-    props.setProperty("rule.1.tag", "Compute");
-
-    // Rule 2: Tag S3 resources with Storage tag
-    props.setProperty("rule.2.name", "S3Resources");
-    props.setProperty("rule.2.field", "line_item_product_code");
-    props.setProperty("rule.2.operator", "==");
-    props.setProperty("rule.2.value", "AmazonS3");
-    props.setProperty("rule.2.tag", "Storage");
-
-    // Rule 3: Tag RDS resources with Database tag
-    props.setProperty("rule.3.name", "RDSResources");
-    props.setProperty("rule.3.field", "line_item_product_code");
-    props.setProperty("rule.3.operator", "==");
-    props.setProperty("rule.3.value", "AmazonRDS");
-    props.setProperty("rule.3.tag", "Database");
-
     // Create parent directory if it doesn't exist
     java.nio.file.Path path = java.nio.file.Paths.get(rulesFile);
     java.nio.file.Files.createDirectories(path.getParent());
 
+    // Load the bundled default rules
+    Properties props = loadBundledRules();
+    
     // Save properties to file
-    try (java.io.FileOutputStream out = new java.io.FileOutputStream(rulesFile)) {
+    try (FileOutputStream out = new FileOutputStream(rulesFile)) {
       props.store(out, "Default tagging rules for CUR ingestion");
       System.out.println("Created default tagging rules file: " + rulesFile);
     }
+  }
+  
+  /**
+   * Loads the default tagging rules from the bundled resource file
+   *
+   * @return Properties object containing the default rules
+   * @throws IOException If the resource file cannot be read
+   */
+  public static Properties loadBundledRules() throws IOException {
+    Properties props = new Properties();
+    
+    try (InputStream is = DirectTaggingEngine.class.getResourceAsStream(DEFAULT_RULES_RESOURCE)) {
+      if (is == null) {
+        throw new IOException("Default rules resource not found: " + DEFAULT_RULES_RESOURCE);
+      }
+      props.load(is);
+      System.out.println("Loaded bundled tagging rules from resource: " + DEFAULT_RULES_RESOURCE);
+    }
+    
+    return props;
   }
 
   /**
@@ -523,5 +537,14 @@ public class DirectTaggingEngine implements Serializable {
    */
   public List<CURTagRule> getRules() {
     return tagRules;
+  }
+
+  /**
+   * Get the rules properties object
+   *
+   * @return Properties object containing the rules
+   */
+  public Properties getRulesProperties() {
+    return rules;
   }
 }

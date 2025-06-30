@@ -64,8 +64,8 @@ public class CURIngestionApp {
         System.exit(1);
       }
 
-      // Create tagging rules file if it doesn't exist
-      if (!Files.exists(Paths.get(rulesFile))) {
+      // If a rules file path is specified but the file doesn't exist, create it from the bundled rules
+      if (!rulesFile.isEmpty() && !Files.exists(Paths.get(rulesFile))) {
         DirectTaggingEngine.createDefaultRulesFile(rulesFile);
       }
 
